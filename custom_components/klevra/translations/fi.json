@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Yhdistä Klevra Homeen",
+        "description": "Liitä siltatunnus. Löydät sen sovelluksesta: Kodin asetukset → 🏠 Home Assistant. Samalta sivulta saat myös palvelimen osoitteen valmiina.",
+        "data": {
+          "tunnus": "Siltatunnus",
+          "palvelin": "Palvelin"
+        }
+      }
+    },
+    "error": {
+      "tunnus_ei_kelpaa": "Tunnus ei kelvannut. Tarkista että kopioit sen kokonaan.",
+      "palvelin_ei_vastaa": "Palvelin ei vastannut. Tarkista osoite.",
+      "yhteysvirhe": "Yhteyttä ei saatu. Tarkista internet-yhteys."
+    },
+    "abort": {
+      "already_configured": "Tämä silta on jo yhdistetty."
+    }
+  }
+}

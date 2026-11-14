@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Klevra Home",
+        "description": "Paste the bridge token from the app: Home settings → 🏠 Home Assistant. The same page also shows the server address.",
+        "data": {
+          "tunnus": "Bridge token",
+          "palvelin": "Server"
+        }
+      }
+    },
+    "error": {
+      "tunnus_ei_kelpaa": "The token was not accepted. Check that you copied all of it.",
+      "palvelin_ei_vastaa": "The server did not respond. Check the address.",
+      "yhteysvirhe": "Could not connect. Check your internet connection."
+    },
+    "abort": {
+      "already_configured": "This bridge is already connected."
+    }
+  }
+}
