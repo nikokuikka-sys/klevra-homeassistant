@@ -122,26 +122,39 @@ class Klevrasilta:
 
     # ── Havainnot ────────────────────────────────────────────────────────────
 
-    def _huone(self, eid):
-        """Entiteetin alue (huone) Home Assistantin rekistereistä.
+    def _rekisteri(self, eid):
+        """Entiteetin alue (huone) JA laite Home Assistantin rekistereistä.
 
         🔴 ALUE EI OLE ATTRIBUUTTI. Se on entiteetti-, laite- ja aluerekisterin
         yhdistelmä, eikä se näy `/api/states`-vastauksessa lainkaan. Siksi
         palvelimen puolella huonetta joudutaan hakemaan templatella — mutta
         lisäosa pyörii Home Assistantin SISÄLLÄ, jossa tieto on ilmaiseksi.
+
+        🔴 SAMA PÄTEE LAITTEESEEN. [SALMI 14.11.2026, Nikon havainto]
+        «sähköauton laturi eve01 jossa on eri toimintoja pitäisi olla yksi
+        laite jonka sisällä on nämä kaikki toiminnot tai arvot» — laite on
+        oma rekisteri, eikä yksikään entiteetin attribuutti kerro mihin
+        laitteeseen se kuuluu. `device_id` on se tieto, ja se on tässä
+        funktiossa jo käsillä: sitä käytettiin vain alueen hakuun ja
+        heitettiin sen jälkeen pois.
+
+        Palauttaa (huone, luokka, laite_id, laite_nimi, valmistaja, malli).
         """
+        tyhja = (None, None, None, None, None, None)
         try:
             from homeassistant.helpers import area_registry, device_registry, entity_registry
 
             er = entity_registry.async_get(self.hass)
             merkinta = er.async_get(eid)
             if merkinta is None:
-                return None, None
+                return tyhja
             alue_id = merkinta.area_id
-            if alue_id is None and merkinta.device_id:
+            laite = None
+            if merkinta.device_id:
                 dr = device_registry.async_get(self.hass)
                 laite = dr.async_get(merkinta.device_id)
-                alue_id = laite.area_id if laite else None
+                if alue_id is None:
+                    alue_id = laite.area_id if laite else None
             nimi = None
             if alue_id:
                 ar = area_registry.async_get(self.hass)
@@ -149,13 +162,25 @@ class Klevrasilta:
                 nimi = alue.name if alue else None
             # entity_category: 'config' tai 'diagnostic' = ei käyttäjän ohjain.
             luokka = merkinta.entity_category
-            return nimi, (luokka.value if hasattr(luokka, "value") else luokka)
+            # 🔴 name_by_user ENSIN: jos asukas on nimennyt laitteen HA:ssa,
+            # se nimi on se jonka hän odottaa näkevänsä myös Klevrassa.
+            laite_nimi = None
+            if laite is not None:
+                laite_nimi = getattr(laite, "name_by_user", None) or getattr(laite, "name", None)
+            return (
+                nimi,
+                (luokka.value if hasattr(luokka, "value") else luokka),
+                merkinta.device_id or None,
+                (str(laite_nimi)[:80] if laite_nimi else None),
+                (str(laite.manufacturer)[:60] if laite is not None and laite.manufacturer else None),
+                (str(laite.model)[:60] if laite is not None and laite.model else None),
+            )
         except Exception as e:  # noqa: BLE001
             # Rekisterin rakenne on vaihtunut Home Assistantin versioiden välillä.
             # Huoneen puuttuminen ei ole syy jättää tilat lähettämättä.
             if self._virheita == 0:
-                _LOGGER.debug("Klevra: aluetta ei saatu (%s)", e)
-            return None, None
+                _LOGGER.debug("Klevra: rekisteritietoa ei saatu (%s)", e)
+            return tyhja
 
     def _attribuutit(self, tila):
         """Attribuutit katkaistuina. Ei kuvia, ei soittolistoja, ei tokeneita."""
@@ -185,7 +210,7 @@ class Klevrasilta:
                     continue
             elif not eid.startswith(KIINNOSTAVAT):
                 continue
-            huone, luokka = self._huone(eid)
+            huone, luokka, laite_id, laite_nimi, valmistaja, malli = self._rekisteri(eid)
             ulos.append(
                 {
                     "entiteetti": eid,
@@ -193,6 +218,14 @@ class Klevrasilta:
                     "yksikko": tila.attributes.get("unit_of_measurement"),
                     "nimi": tila.attributes.get("friendly_name"),
                     "huone": huone,
+                    # 🔴 LAITE, EI ENTITEETTI. Nämä neljä kenttää ovat se tieto,
+                    # jolla palvelin yhdistää kahdeksan entiteettiä yhdeksi
+                    # latauslaitteeksi (src/services/laiteryhmat.js). Ilman
+                    # niitä ryhmä on pakko arvata nimestä.
+                    "laite_id": laite_id,
+                    "laite_nimi": laite_nimi,
+                    "valmistaja": valmistaja,
+                    "malli": malli,
                     # 🔴 `laji` ON device_class, EI entity_category.
                     # Palvelin kirjoittaa `laji`:n suoraan `device_class`-
                     # attribuuttiin (kotiSilta.js), ja device_class ratkaisee
