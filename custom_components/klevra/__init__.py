@@ -40,7 +40,9 @@ from .const import (
     ATTR_MAARA_KATTO,
     ATTR_MERKKI_KATTO,
     DOMAIN,
+    HALLINTA_VERSIO,
     KIELLETYT_KENTAT,
+    LISAOSA_VERSIO,
     KIINNOSTAVAT,
     ODOTUS_S,
     OLETUS_PALVELIN,
@@ -50,6 +52,7 @@ from .const import (
     SALLITUT,
     VIRHE_KATTO_S,
 )
+from .hallinta import Hallinta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,6 +122,10 @@ class Klevrasilta:
         self.vali = OLETUS_VALI
         self._virheita = 0
         self._huoneet = {}
+        # 🛠 Hallintakanava [RANTA 17.11.2026]. Tulokset lähtevät SEURAAVALLA
+        # havaintokutsulla — ei omaa reittiä, ei omaa yhteyttä.
+        self.hallinta = Hallinta(hass)
+        self._tulokset = []
 
     # ── Havainnot ────────────────────────────────────────────────────────────
 
@@ -279,6 +286,14 @@ class Klevrasilta:
             # Sivuvaikutus: yhden komennon kaatuminen ei saa pysäyttää siltaa.
             _LOGGER.error("Klevra: komennon suoritus epaonnistui: %s", e)
 
+    async def _aja_hallinta(self, tehtava):
+        """Suorita yksi hallintatehtävä ja jätä tulos lähtemään."""
+        tid = tehtava.get("id")
+        ok, tulos = await self.hallinta.suorita(
+            str(tehtava.get("toiminto") or ""), tehtava.get("tiedot") or {}
+        )
+        self._tulokset.append({"id": tid, "ok": ok, "tulos": tulos})
+
     # ── Pääsilmukka ──────────────────────────────────────────────────────────
 
     async def aja(self):
@@ -288,9 +303,17 @@ class Klevrasilta:
 
         while True:
             try:
+                lahtevat = self._tulokset[:20]
                 vastaus = await istunto.post(
                     f"{self.palvelin}{POLKU_HAVAINNOT}",
-                    json={"havainnot": self._kerää(), "odota_s": ODOTUS_S},
+                    json={
+                        "havainnot": self._kerää(),
+                        # 🔴 Kun tulos odottaa lähtöä, EI pitkää odotusta: käyttäjä
+                        # katsoo sovelluksessa pyörivää merkkiä juuri nyt.
+                        "odota_s": 0 if self._tulokset else ODOTUS_S,
+                        "lisaosa": {"versio": LISAOSA_VERSIO, "hallinta": HALLINTA_VERSIO},
+                        "hallinta_tulokset": lahtevat,
+                    },
                     headers={OTSAKE: self.tunnus},
                     timeout=ODOTUS_S + 15,
                 )
@@ -303,10 +326,14 @@ class Klevrasilta:
                     continue
 
                 data = await vastaus.json()
+                # Lähteneet tulokset pois vasta kun palvelin vastasi.
+                del self._tulokset[: len(lahtevat)]
                 for komento in data.get("komennot", []):
                     await self._aja_komento(komento)
+                for tehtava in (data.get("hallinta") or [])[:10]:
+                    await self._aja_hallinta(tehtava)
 
-                self.vali = int(data.get("seuraava_s") or OLETUS_VALI)
+                self.vali = 0 if self._tulokset else int(data.get("seuraava_s") or OLETUS_VALI)
                 self._virheita = 0
 
             except Exception as e:  # noqa: BLE001

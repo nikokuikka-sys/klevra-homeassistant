@@ -48,6 +48,22 @@ kymmenellä rivillä joita ei ohjata.
 
 ---
 
+## Laitteiden lisäys Klevrasta (1.2.0)
+
+Versiosta 1.2.0 alkaen laitteita voi lisätä ja hallita Klevra-sovelluksesta
+(**Kodin asetukset → 🛠 Lisää laitteita**) avaamatta Home Assistantia:
+
+- **Löydetyt laitteet** — Home Assistantin itse löytämät (esim. Shelly) yhdellä painalluksella
+- **Lisää integraatio** — tarkistetusta luettelosta (Shelly, Zigbee, Matter, Vallox, ViCare …);
+  Home Assistantin kysymät kentät täytetään Klevrassa
+- **Zigbee-pariliitos** (vaatii Zigbee-radion) ja **Matter-laite jakokoodilla**
+- **Laitteiden nimet ja huoneet**
+
+Rajat ovat tässä lisäosassa, eivät palvelimella: vain nimetyt toiminnot
+(`hallinta.py`), käyttäjän aloittama lisäys vain luettelon integraatioille, eikä
+Klevra koske lisäykseen, joka aloitettiin Home Assistantin omassa näkymässä.
+Valmistajan tunnukset kulkevat suoraan Home Assistantiin — Klevra ei tallenna niitä.
+
 ## Asennus
 
 ### 1. Lisää tietovarasto HACSiin

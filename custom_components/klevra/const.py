@@ -82,3 +82,50 @@ SALLITUT = {
 # lähettäisi. `entity_id` asetetaan aina paikallisesti komennon entiteetistä,
 # jottei yksi komento voi osua koko kotiin (`entity_id: all`).
 KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 🛠 HALLINTAKANAVA [RANTA 17.11.2026, Niko klo 14.28]
+#
+# «päästään siirtämään kaikki laitteet pois homey ja siirtämään ne home
+#  assistant kautta ohjattavaksi» — ilman että käyttäjä menee Home
+# Assistantin omaan käyttöliittymään.
+#
+# 🔴 ERI KANAVA KUIN LAITEKOMENNOT. `SALLITUT` yllä on laitteen ohjausta
+# (valo päälle). Tämä on Home Assistantin RAKENTEEN muuttamista (integraatio
+# lisätään, laite nimetään). Ne pidetään erillään, jotta laitekomennon
+# sallittu lista ei koskaan laajene «hallinnan nimissä».
+#
+# 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
+# Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
+HALLINTA_VERSIO = 1
+LISAOSA_VERSIO = "1.2.0"
+HALLINTA_TOIMINNOT = (
+    "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
+    "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)
+    "flow_aloita",     # aloita integraation lisäys (vain KATALOGI)
+    "flow_jatka",      # lähetä vaiheen kentät / valitse valikosta
+    "flow_peru",       # keskeytä lisäys
+    "zigbee_liitos",   # avaa Zigbee-pariliitos (zha.permit) 30–254 s
+    "matter_koodi",    # lisää Matter-laite jakokoodilla (esim. Homeysta)
+    "laitteet",        # laiterekisteri + alueet
+    "nimea_laite",     # laitteen nimi ja huone
+)
+
+# 🔴 TARKISTETTU LUETTELO. Käyttäjän ALOITTAMA lisäys on mahdollinen vain
+# näille. HA:n ITSE LÖYTÄMÄT laitteet saa vahvistaa riippumatta tästä
+# listasta — ne HA on jo tunnistanut, ja «Lisää» on sama yksi painallus kuin
+# HA:n omassa käyttöliittymässä. `test/ha-hallinta.mjs` vaatii, että
+# palvelimen luettelo (src/services/haHallinta.js) on sama kuin tämä.
+HALLINTA_KATALOGI = (
+    "shelly", "zha", "matter", "thread", "esphome", "mqtt",
+    "vallox", "vicare", "mill", "nibe_heatpump",
+    "hue", "tuya", "sonos", "cast", "apple_tv", "androidtv_remote",
+    "samsungtv", "webostv", "met", "nordpool", "easee", "zaptec",
+)
+
+# Nämä EIVÄT koskaan kelpaa flow-kohteiksi, eivät löydettyinäkään: oma
+# siltamme (ettei Klevra voi katkaista itseään) ja Supervisorin sisäiset.
+HALLINTA_KIELLETYT = ("klevra", "hassio", "homeassistant", "backup", "cloud")
+
+# Tuloksen katto. Yksi laiterekisteri voi olla satoja laitteita.
+HALLINTA_LAITE_KATTO = 500
