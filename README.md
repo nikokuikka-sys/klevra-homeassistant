@@ -59,6 +59,11 @@ Versiosta 1.2.0 alkaen laitteita voi lisätä ja hallita Klevra-sovelluksesta
 - **Zigbee-pariliitos** (vaatii Zigbee-radion) ja **Matter-laite jakokoodilla**
 - **Laitteiden nimet ja huoneet**
 
+**1.3.0** lisää: **HACS-lataus** tarkistetusta listasta (Hisense/ConnectLife-kodinkoneet),
+Home Assistantin **uudelleenkäynnistys**, **päivitykset** (`update.install`, varmuuskopio ensin
+kun tuettu), **varmuuskopio nyt** ja Home Assistantin omat **sovellukset** (Matter Server,
+Mosquitto, OpenThread Border Router).
+
 Rajat ovat tässä lisäosassa, eivät palvelimella: vain nimetyt toiminnot
 (`hallinta.py`), käyttäjän aloittama lisäys vain luettelon integraatioille, eikä
 Klevra koske lisäykseen, joka aloitettiin Home Assistantin omassa näkymässä.

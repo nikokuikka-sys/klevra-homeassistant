@@ -32,10 +32,12 @@ import logging
 import re
 
 from .const import (
+    HACS_KATALOGI,
     HALLINTA_KATALOGI,
     HALLINTA_KIELLETYT,
     HALLINTA_LAITE_KATTO,
     HALLINTA_TOIMINNOT,
+    SOVELLUS_KATALOGI,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -363,3 +365,151 @@ class Hallinta:
             raise Hylatty("ei_muutoksia")
         dr.async_update_device(laite.id, **muutos)
         return {"laite_id": laite.id, "muutettu": sorted(muutos)}
+
+    # ═══ VAIHE 2: HACS ═══════════════════════════════════════════════════════
+    #
+    # 🔴 HACS:llä ei ole palvelukutsuja, vain websocket-komennot, joita sen oma
+    # käyttöliittymä käyttää. Teemme saman kuin ne: `hass.data["hacs"]`,
+    # `async_register_repository`, `async_download_repository`. Nämä ovat HACSin
+    # sisäisiä, joten jokainen kutsu on suojattu ja virhe palautetaan sanoin.
+
+    def _hacs(self):
+        hacs = (getattr(self.hass, "data", None) or {}).get("hacs")
+        if hacs is None:
+            raise Hylatty("hacs_puuttuu")
+        return hacs
+
+    @staticmethod
+    def _hacs_repo(hacs, nimi):
+        try:
+            return hacs.repositories.get_by_full_name(nimi)
+        except Exception:  # noqa: BLE001  ei löydy = None, sama kuin HACSilla
+            return None
+
+    async def _hacs_tila(self, _tiedot):
+        hacs = (getattr(self.hass, "data", None) or {}).get("hacs")
+        repot = []
+        for nimi, domain in HACS_KATALOGI.items():
+            r = self._hacs_repo(hacs, nimi) if hacs is not None else None
+            d = getattr(r, "data", None)
+            repot.append({
+                "repo": nimi,
+                "domain": domain,
+                "ladattu": bool(getattr(d, "installed", False)),
+                "versio": getattr(d, "installed_version", None),
+                "uusin": getattr(d, "last_version", None),
+                # Ladattu mutta ei vielä ladattu Home Assistantiin = uudelleenkäynnistys puuttuu.
+                "kaytossa": domain in set(getattr(self.hass.config, "components", set()) or set())
+                or bool(self.hass.config_entries.async_entries(domain)),
+            })
+        return {"hacs": hacs is not None, "repot": repot}
+
+    async def _hacs_lataa(self, tiedot):
+        nimi = str(tiedot.get("repo") or "")
+        if nimi not in HACS_KATALOGI:
+            raise Hylatty("repo_ei_luettelossa")
+        hacs = self._hacs()
+        r = self._hacs_repo(hacs, nimi)
+        if r is None:
+            await hacs.async_register_repository(repository_full_name=nimi, category="integration")
+            r = self._hacs_repo(hacs, nimi)
+        if r is None:
+            raise Hylatty("hacs_ei_loytanyt")
+        lataa = getattr(r, "async_download_repository", None) or getattr(r, "async_install", None)
+        if lataa is None:
+            raise Hylatty("hacs_versio_ei_tuettu")
+        await lataa()
+        try:
+            await hacs.data.async_write()
+        except Exception:  # noqa: BLE001  HACSin oma tallennus; lataus on jo levyllä
+            pass
+        return {"ladattu": nimi, "domain": HACS_KATALOGI[nimi], "vaatii_uudelleenkaynnistyksen": True}
+
+    async def _kaynnista_uudelleen(self, _tiedot):
+        """🔴 VIIVEELLÄ. Tulos lähtee Klevraan ennen kuin Home Assistant sammuu;
+        muuten sovellus odottaisi vastausta, jota ei koskaan tule."""
+        async def kaynnista():
+            await self.hass.services.async_call("homeassistant", "restart", {}, blocking=False)
+
+        self.hass.loop.call_later(5, lambda: self.hass.async_create_task(kaynnista()))
+        return {"kaynnistyy_s": 5}
+
+    # ═══ VAIHE 3: PÄIVITYKSET, SOVELLUKSET, VARMUUSKOPIOT ═══════════════════
+
+    async def _paivitykset(self, _tiedot):
+        paivitykset, varmuus = [], {}
+        for st in self.hass.states.async_all():
+            eid = st.entity_id
+            if eid.startswith("update."):
+                a = st.attributes
+                paivitykset.append({
+                    "entiteetti": eid,
+                    "nimi": str(a.get("title") or a.get("friendly_name") or eid)[:80],
+                    "saatavilla": st.state == "on",
+                    "versio": a.get("installed_version"),
+                    "uusin": a.get("latest_version"),
+                    "kaynnissa": bool(a.get("in_progress")),
+                    "ohitettu": a.get("skipped_version"),
+                    "tiedotteet": a.get("release_url"),
+                    "varmuuskopio": bool(int(a.get("supported_features") or 0) & 8),
+                })
+            elif eid.startswith("sensor.backup_"):
+                varmuus[eid[len("sensor.backup_"):]] = st.state
+        paivitykset.sort(key=lambda x: (not x["saatavilla"], x["nimi"].lower()))
+        return {"paivitykset": paivitykset, "varmuuskopiot": varmuus}
+
+    async def _paivita(self, tiedot):
+        eid = str(tiedot.get("entiteetti") or "")
+        st = self.hass.states.get(eid) if eid.startswith("update.") else None
+        if st is None:
+            raise Hylatty("paivitysta_ei_loydy")
+        if st.state != "on":
+            raise Hylatty("ei_paivitettavaa")
+        data = {"entity_id": eid}
+        # 🔴 Varmuuskopio ennen päivitystä aina kun laite sen tukee.
+        if int(st.attributes.get("supported_features") or 0) & 8:
+            data["backup"] = True
+        await self.hass.services.async_call("update", "install", data, blocking=False)
+        return {"aloitettu": eid, "varmuuskopio": "backup" in data}
+
+    def _sovellushallinta(self, slug):
+        if "hassio" not in set(getattr(self.hass.config, "components", set()) or set()):
+            raise Hylatty("ei_supervisoria")
+        from homeassistant.components.hassio import AddonManager
+
+        return AddonManager(self.hass, _LOGGER, slug, slug)
+
+    async def _sovellukset(self, _tiedot):
+        if "hassio" not in set(getattr(self.hass.config, "components", set()) or set()):
+            return {"supervisor": False, "sovellukset": []}
+        ulos = []
+        for slug in SOVELLUS_KATALOGI:
+            try:
+                info = await self._sovellushallinta(slug).async_get_addon_info()
+                ulos.append({"slug": slug, "tila": str(_arvo(info.state)), "versio": info.version,
+                             "paivitys": bool(info.update_available)})
+            except Exception as e:  # noqa: BLE001  yksi sovellus ei kaada listaa
+                ulos.append({"slug": slug, "tila": "tuntematon", "virhe": str(e)[:120]})
+        return {"supervisor": True, "sovellukset": ulos}
+
+    async def _asenna_sovellus(self, tiedot):
+        slug = str(tiedot.get("slug") or "")
+        if slug not in SOVELLUS_KATALOGI:
+            raise Hylatty("sovellus_ei_luettelossa")
+        m = self._sovellushallinta(slug)
+        info = await m.async_get_addon_info()
+        tila = str(_arvo(info.state))
+        if tila == "not_installed":
+            await m.async_install_addon()
+        if tila != "running":
+            await m.async_start_addon()
+        return {"slug": slug, "oli": tila, "kaynnissa": True}
+
+    async def _varmuuskopio(self, _tiedot):
+        if self.hass.services.has_service("backup", "create_automatic"):
+            await self.hass.services.async_call("backup", "create_automatic", {}, blocking=False)
+            return {"aloitettu": "backup.create_automatic"}
+        if self.hass.services.has_service("hassio", "backup_full"):
+            await self.hass.services.async_call("hassio", "backup_full", {"name": "Klevra"}, blocking=False)
+            return {"aloitettu": "hassio.backup_full"}
+        raise Hylatty("varmuuskopio_ei_kaytossa")

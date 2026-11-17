@@ -97,8 +97,8 @@ KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
 #
 # 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
 # Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
-HALLINTA_VERSIO = 1
-LISAOSA_VERSIO = "1.2.0"
+HALLINTA_VERSIO = 2
+LISAOSA_VERSIO = "1.3.0"
 HALLINTA_TOIMINNOT = (
     "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
     "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)
@@ -109,6 +109,15 @@ HALLINTA_TOIMINNOT = (
     "matter_koodi",    # lisää Matter-laite jakokoodilla (esim. Homeysta)
     "laitteet",        # laiterekisteri + alueet
     "nimea_laite",     # laitteen nimi ja huone
+    # ── 1.3.0 (HALLINTA_VERSIO 2): vaiheet 2 ja 3 ──
+    "hacs_tila",       # HACS asennettu? luettelon repojen tila
+    "hacs_lataa",      # lataa luettelon repo HACSista (vaatii uudelleenkäynnistyksen)
+    "kaynnista_uudelleen",  # Home Assistantin uudelleenkäynnistys (viiveellä)
+    "paivitykset",     # update-entiteetit + varmuuskopioiden tila
+    "paivita",         # update.install yhdelle update-entiteetille
+    "sovellukset",     # luettelon sovellusten (entiset lisäosat) tila
+    "asenna_sovellus", # asenna ja käynnistä luettelon sovellus
+    "varmuuskopio",    # luo varmuuskopio nyt
 )
 
 # 🔴 TARKISTETTU LUETTELO. Käyttäjän ALOITTAMA lisäys on mahdollinen vain
@@ -121,6 +130,24 @@ HALLINTA_KATALOGI = (
     "vallox", "vicare", "mill", "nibe_heatpump",
     "hue", "tuya", "sonos", "cast", "apple_tv", "androidtv_remote",
     "samsungtv", "webostv", "met", "nordpool", "easee", "zaptec",
+    # HACSista ladattavat (HACS_KATALOGI): lisättävissä vasta latauksen jälkeen.
+    "connectlife", "hisense_ac_plugin",
+)
+
+# 🔴 HACS: VAIN NÄMÄ REPOT. HACS-integraatiot ovat yhteisön koodia, jota Home
+# Assistant -projekti ei tarkista. Siksi luettelo on lyhyt ja jokainen rivi on
+# valittu käsin: repo → integraation domain. [Niko 17.11.2026: Hisense-koneet]
+HACS_KATALOGI = {
+    "oyvindwe/connectlife-ha": "connectlife",
+    "Connectlife-LLC/HomeAssistantPlugin": "hisense_ac_plugin",
+}
+
+# 🔴 SOVELLUKSET (Supervisor-lisäosat): vain Home Assistantin omat (core_*).
+# Ne ovat edellytyksiä radioille, eivät mitä tahansa ohjelmia kotikoneelle.
+SOVELLUS_KATALOGI = (
+    "core_matter_server",
+    "core_mosquitto",
+    "core_openthread_border_router",
 )
 
 # Nämä EIVÄT koskaan kelpaa flow-kohteiksi, eivät löydettyinäkään: oma
