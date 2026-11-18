@@ -53,6 +53,7 @@ from .const import (
     VIRHE_KATTO_S,
 )
 from .hallinta import Hallinta
+from .liitos import vahdi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +61,11 @@ CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(
             {
-                vol.Required("tunnus"): cv.string,
+                # 🔴 EI PAKOLLINEN. Kortilla on pelkkä `klevra:` ilman tunnusta:
+                # tunnusta ei ole olemassa kortin kirjoitushetkellä. Rivi on se,
+                # mikä saa Home Assistantin lataamaan tämän integraation, jotta
+                # `liitos.vahdi` pääsee odottamaan QR-skannausta. [SALMI 18.11.2026]
+                vol.Optional("tunnus"): cv.string,
                 vol.Optional("palvelin", default=OLETUS_PALVELIN): cv.string,
                 vol.Optional("entiteetit", default=[]): vol.All(cv.ensure_list, [cv.string]),
             }
@@ -92,10 +97,24 @@ async def async_unload_entry(hass, entry):
 
 
 async def async_setup(hass, config):
-    """YAML-asennus. Säilytetty, mutta HACS + config flow on se polku jota käytetään."""
+    """YAML-asennus ja kortilta liittyminen.
+
+    Kolme tapausta, tässä järjestyksessä:
+      1. `klevra:` puuttuu configuration.yaml:ista → ei tehtävää. (Ilman entryä
+         Home Assistant ei kutsu tätä lainkaan.)
+      2. `klevra:` on, mutta tunnusta ei → 🪪 KORTTI. Jäädään vahtimaan tunnusta
+         (`liitos.vahdi`) ja asennus syntyy itsestään kun QR skannataan.
+      3. `klevra:` ja tunnus → vanha YAML-polku, muuttumattomana.
+    """
     if DOMAIN not in config:
         return True
-    asetukset = config[DOMAIN]
+    asetukset = config[DOMAIN] or {}
+    if not asetukset.get("tunnus"):
+        # 🪪 Kortin polku. Taustatehtävä, jotta käynnistys ei jää odottamaan:
+        # laite voi seisoa nurkassa viikon ennen kuin tarra skannataan.
+        hass.async_create_task(vahdi(hass))
+        _LOGGER.info("Klevra: odotetaan liitostunnusta (kortti-asennus)")
+        return True
     silta = Klevrasilta(
         hass,
         tunnus=asetukset["tunnus"],

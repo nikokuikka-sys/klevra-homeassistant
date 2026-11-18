@@ -98,7 +98,7 @@ KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
 # 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
 # Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
 HALLINTA_VERSIO = 2
-LISAOSA_VERSIO = "1.3.0"
+LISAOSA_VERSIO = "1.4.0"
 HALLINTA_TOIMINNOT = (
     "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
     "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)
@@ -127,6 +127,9 @@ HALLINTA_TOIMINNOT = (
 # palvelimen luettelo (src/services/haHallinta.js) on sama kuin tämä.
 HALLINTA_KATALOGI = (
     "shelly", "zha", "matter", "thread", "esphome", "mqtt",
+    # 🪪 1.4.0: lähiverkkoon kytketty radio (SMLIGHT SLZB, PoE). Ilman tätä
+    # katalogi ohjasi vain USB-tikkuun. [Niko 18.11.2026: SLZB-MR2]
+    "smlight",
     "vallox", "vicare", "mill", "nibe_heatpump",
     "hue", "tuya", "sonos", "cast", "apple_tv", "androidtv_remote",
     "samsungtv", "webostv", "met", "nordpool", "easee", "zaptec",

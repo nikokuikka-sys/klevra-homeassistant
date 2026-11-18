@@ -1,7 +1,7 @@
 {
   "domain": "klevra",
   "name": "Klevra Home",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "documentation": "https://laskuposti.com/ohje/home-assistant",
   "dependencies": [],
   "codeowners": [],

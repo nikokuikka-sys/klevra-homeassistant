@@ -51,6 +51,32 @@ class KlevraConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=virheet,
         )
 
+    async def async_step_import(self, user_input=None):
+        """🪪 LIITOS KORTILTA (liitos.py). Ei lomaketta, ei kirjautumista.
+
+        Sama tarkistus kuin käyttöliittymän polulla: väärä tunnus ei saa jäädä
+        asennukseksi, joka näyttää olevansa kunnossa. Jos tarkistus ei mene
+        läpi, tämä keskeytyy ja `liitos.vahdi` yrittää uudelleen — palvelin voi
+        olla alhaalla juuri sillä sekunnilla kun kortti käynnistyy.
+        """
+        d = user_input or {}
+        tunnus = str(d.get("tunnus") or "").strip()
+        palvelin = str(d.get("palvelin") or OLETUS_PALVELIN).rstrip("/")
+        if not tunnus:
+            return self.async_abort(reason="tunnus_puuttuu")
+
+        # Sama silta ei saa olla kahdesti — muuten dataa lähetettäisiin tuplana.
+        await self.async_set_unique_id(tunnus[:16])
+        self._abort_if_unique_id_configured()
+
+        tulos = await self._tarkista(palvelin, tunnus)
+        if not tulos.get("ok"):
+            return self.async_abort(reason=tulos.get("syy") or "yhteysvirhe")
+        return self.async_create_entry(
+            title="Klevra Home",
+            data={"tunnus": tunnus, "palvelin": palvelin},
+        )
+
     async def _tarkista(self, palvelin, tunnus):
         """Varmista että tunnus kelpaa ennen kuin integraatio luodaan."""
         try:

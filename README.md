@@ -105,6 +105,27 @@ valmiina.
 Tunnus tarkistetaan heti: jos se on väärä, se kerrotaan dialogissa — ei tuntia
 myöhemmin lokissa.
 
+### 🪪 Vaihtoehto: liittyminen ilman tätä dialogia (1.4.0)
+
+Klevra HUB -laite liittyy **itse**, eikä kukaan avaa Home Assistantia. Ketju on:
+QR-koodi Klevra-sovelluksessa → Owella Hub → laite saa siltatunnuksen → tämä
+integraatio huomaa sen ≤ 10 s ja luo asennuksen itse.
+
+Kortille kirjoitetaan tämä kansio ja `configuration.yaml`:iin **yksi rivi**:
+
+```yaml
+klevra:
+```
+
+Rivi on tyhjä tarkoituksella: tunnusta ei ole olemassa kortin kirjoitushetkellä.
+Tunnus luetaan ympäristömuuttujasta `KLEVRA_TUNNUS` tai tiedostosta
+`/config/klevra-liitos.json` (myös `/share/klevra/liitos.json`,
+`/data/klevra-liitos.json`), ja se **pyyhitään levyltä** heti kun asennus on
+syntynyt. Tunnusta ei kirjoiteta lokiin.
+
+Koko ketju, kortin rakenne ja mikä siitä on vielä tekemättä:
+[`doc/KLEVRA-HUB-KORTTI.md`](https://github.com/nikokuikka-sys/laskuhelposti/blob/main/doc/KLEVRA-HUB-KORTTI.md).
+
 ---
 
 ## Tämä ei korvaa Ohjaamo-integraatiota
