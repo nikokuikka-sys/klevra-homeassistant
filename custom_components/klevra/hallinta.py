@@ -37,6 +37,12 @@ from .const import (
     HALLINTA_KIELLETYT,
     HALLINTA_LAITE_KATTO,
     HALLINTA_TOIMINNOT,
+    # 🔴 Nämä kaksi puuttuivat kun `tarkista_palvelu` siirtyi tänne
+    # 19.11.2026. `python -m py_compile` hyväksyi tiedoston — nimi joka ei
+    # ole olemassa on virhe vasta AJOSSA. CLAUDE.md sääntö 2: syntaksi-
+    # tarkistus todistaa että tiedosto jäsentyy, ei että se toimii.
+    KIELLETYT_KENTAT,
+    SALLITUT,
     SOVELLUS_KATALOGI,
 )
 
@@ -150,6 +156,38 @@ def _kentat_skeemasta(skeema):
     if not kentat:
         raise ValueError("skeemassa ei ollut yhtään kenttää")
     return kentat
+
+
+def tarkista_palvelu(entiteetti, palvelu):
+    """Kaksi porttia jokaiselle palvelukutsulle. (domain, nimi) tai (None, syy).
+
+    🔴 YKSI SÄÄNTÖ, YKSI PAIKKA. Tämä oli ennen kopioituna `__init__.py`:n
+    komentopolkuun. Kun automaatioiden kirjoitus tuli kolmanneksi kutsujaksi
+    (19.11.2026), kaksi kopiota olisi ollut kolme — ja kolmas ajautuu
+    ensimmäisenä erilleen. Nyt kaikki kolme kysyvät samalta funktiolta.
+
+    1) Palvelu on domainin sallitulla listalla (`SALLITUT`).
+    2) Palvelun domain on SAMA kuin entiteetin domain. Ilman tätä
+       `climate.set_temperature` menisi water_heater-entiteetille — se vika
+       oli palvelimen puolella 10.11.2026.
+    """
+    entiteetti = str(entiteetti or "")
+    palvelu = str(palvelu or "")
+    if not entiteetti or "." not in palvelu or "." not in entiteetti:
+        return None, "vaillinainen_komento"
+    domain, nimi = palvelu.split(".", 1)
+    if nimi not in SALLITUT.get(domain, set()):
+        return None, "palvelu_ei_sallittu"
+    if entiteetti.split(".")[0] != domain:
+        return None, "palvelu_ei_sovi_entiteetille"
+    return (domain, nimi), None
+
+
+def puhdista_tiedot(tiedot, entiteetti):
+    """Palvelukutsun kentät: kielletyt pois, entity_id aina paikallisesti."""
+    puhdas = {k: v for k, v in (tiedot or {}).items() if k not in KIELLETYT_KENTAT}
+    puhdas["entity_id"] = entiteetti
+    return puhdas
 
 
 class Hallinta:
@@ -728,6 +766,213 @@ class Hallinta:
             "solmut": solmut,
             "muut": self._muut_radiot(),
         }
+
+    # ── Automaatiot Home Assistantiin ────────────────────────────────────────
+    #
+    # 🏠 [Niko 19.11.2026 klo 07.31: «ohjauksissa käytetään Home Assistant …
+    #  te vain hallitsette, jolloin Home Assistant toimii lähiverkossa
+    #  automaattisesti eikä ole riippuvainen internetyhteydestä».]
+    #
+    # 🔴 TÄMÄ ON SE KOHTA JOSSA KLEVRA LAKKAA OLEMASTA PAKOLLINEN VÄLIKÄSI.
+    # Klevran oma ajastin pyörii Renderissä (`src/routes/auto/alykoti.js`:
+    # minuuttiajastin). Nettikatkossa se ei laukea — se on sama riippuvuus
+    # kuin Shelly Cloud, vain eri pilvi. Tänne kirjoitettu automaatio ajetaan
+    # Raspberryllä ja laukeaa vaikka operaattori olisi alhaalla.
+    #
+    # 🔴 KLEVRA KOSKEE VAIN OMIIN RIVEIHINSÄ. Jokainen kirjoitettu automaatio
+    # saa tunnuksen `klevra_<tunnus>`. Luku–muokkaus–kirjoitus säilyttää
+    # KAIKKI muut rivit sellaisenaan: käyttäjän omat automaatiot ovat hänen,
+    # ja niiden hiljainen ylikirjoitus olisi pahin mahdollinen vika tässä
+    # tiedostossa — se ei näy mistään ennen kuin jokin lakkaa toimimasta.
+
+    AUTOMAATIO_ETULIITE = "klevra_"
+    AUTOMAATIO_KATTO = 100
+    VIIKONPAIVAT = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+    def _automaatiotiedosto(self):
+        return self.hass.config.path("automations.yaml")
+
+    def _lue_automaatiot(self):
+        """Koko automations.yaml listana. Puuttuva tiedosto = tyhjä lista."""
+        import os
+        polku = self._automaatiotiedosto()
+        if not os.path.exists(polku):
+            return []
+        import yaml
+        with open(polku, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            # 🔴 EI YLIKIRJOITETA SITÄ MITÄ EI YMMÄRRETÄ. Jos tiedosto on
+            # jotain muuta kuin lista, käyttäjä on tehnyt sille jotain —
+            # silloin tästä ei kirjoiteta mitään.
+            raise Hylatty("automaatiotiedosto_ei_lista")
+        return data
+
+    def _kirjoita_automaatiot(self, rivit):
+        import os
+        import yaml
+        polku = self._automaatiotiedosto()
+        vara = polku + ".klevra-vara"
+        # 🔴 VARMUUSKOPIO ENNEN KIRJOITUSTA. Jos jokin menee pieleen, käyttäjän
+        # omat automaatiot ovat yhä levyllä yhden nimenvaihdon päässä.
+        if os.path.exists(polku):
+            import shutil
+            shutil.copyfile(polku, vara)
+        tmp = polku + ".klevra-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            yaml.safe_dump(rivit, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        os.replace(tmp, polku)
+
+    def _automaatio_yaml(self, tiedot):
+        """Klevran ajastus → Home Assistantin automaatio. Tarkistettu, ei arvattu."""
+        tunnus = str(tiedot.get("tunnus") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", tunnus):
+            raise Hylatty("tunnus_ei_kelpaa")
+        nimi = str(tiedot.get("nimi") or "Klevra-ajastus")[:80]
+
+        paivat = tiedot.get("paivat")
+        if paivat is None:
+            viikonpaivat = list(self.VIIKONPAIVAT)
+        else:
+            if not isinstance(paivat, list) or not paivat:
+                raise Hylatty("paivat_ei_kelpaa")
+            try:
+                numerot = sorted({int(x) for x in paivat})
+            except Exception:  # noqa: BLE001
+                raise Hylatty("paivat_ei_kelpaa")
+            if any(n < 0 or n > 6 for n in numerot):
+                raise Hylatty("paivat_ei_kelpaa")
+            # 🔴 0 = SUNNUNTAI KLEVRASSA (JS getDay), HA:ssa viikko alkaa
+            # maanantaista. Ilman tätä siirtoa sunnuntain ajastus laukeaisi
+            # maanantaina — hiljaa ja joka viikko.
+            viikonpaivat = [self.VIIKONPAIVAT[(n + 6) % 7] for n in numerot]
+
+        laukaisu = {}
+        aurinko = str(tiedot.get("aurinko") or "")
+        if aurinko in ("nousu", "lasku"):
+            siirto = self._luku(tiedot.get("siirto_min"), -720, 720) or 0
+            # 🔴 ETUMERKKI KIRJOITETAAN AINA. Home Assistant lukee etumerkittömän
+            # arvon positiivisena, joten «01:30:00» toimisi — mutta ihminen joka
+            # avaa automations.yaml:n ei näe siitä kumpaan suuntaan siirto menee.
+            # Mitattu `test/automaatio-kotiin.py`:llä 19.11.2026.
+            merkki = "-" if siirto < 0 else "+"
+            a = abs(int(siirto))
+            laukaisu = {"platform": "sun",
+                        "event": "sunrise" if aurinko == "nousu" else "sunset",
+                        "offset": "%s%02d:%02d:00" % (merkki, a // 60, a % 60)}
+        else:
+            kello = str(tiedot.get("kello") or "")
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", kello):
+                raise Hylatty("kello_ei_kelpaa")
+            laukaisu = {"platform": "time", "at": kello + ":00"}
+
+        toiminnot = tiedot.get("toiminnot")
+        if not isinstance(toiminnot, list) or not toiminnot:
+            raise Hylatty("ei_toimintoja")
+        if len(toiminnot) > 30:
+            raise Hylatty("liikaa_toimintoja")
+        askeleet = []
+        for t in toiminnot:
+            if not isinstance(t, dict):
+                raise Hylatty("toiminto_ei_kelpaa")
+            entiteetti = str(t.get("entity_id") or "")
+            palvelu = str(t.get("palvelu") or "")
+            # 🔴 SAMA PORTTI KUIN SUORALLA KOMENNOLLA. Automaatio on komento
+            # joka ajetaan myöhemmin; sen tarkistus ei saa olla löysempi.
+            pari, syy = tarkista_palvelu(entiteetti, palvelu)
+            if pari is None:
+                raise Hylatty(syy)
+            domain, nimi_p = pari
+            askeleet.append({
+                "service": "%s.%s" % (domain, nimi_p),
+                "target": {"entity_id": entiteetti},
+                "data": {k: v for k, v in (t.get("data") or {}).items()
+                         if k not in KIELLETYT_KENTAT},
+            })
+
+        return {
+            "id": self.AUTOMAATIO_ETULIITE + tunnus,
+            "alias": nimi,
+            # 🔴 KUVAUS KERTOO OMISTAJAN. Käyttäjä, joka avaa Home Assistantin
+            # automaatiolistan, näkee heti mikä rivi on Klevran kirjoittama ja
+            # mikä hänen omansa.
+            "description": "Klevran kirjoittama. Muokkaa Klevrassa — tämä rivi korvataan.",
+            "mode": "single",
+            "trigger": [laukaisu],
+            "condition": ([{"condition": "time", "weekday": viikonpaivat}]
+                          if len(viikonpaivat) < 7 else []),
+            "action": askeleet,
+        }
+
+    async def _lataa_automaatiot(self):
+        await self.hass.services.async_call("automation", "reload", blocking=True)
+
+    async def _automaatio_kirjoita(self, tiedot):
+        uusi = self._automaatio_yaml(tiedot)
+        rivit = await self.hass.async_add_executor_job(self._lue_automaatiot)
+        omat = [r for r in rivit if isinstance(r, dict)
+                and str(r.get("id") or "").startswith(self.AUTOMAATIO_ETULIITE)]
+        korvattu = False
+        ulos = []
+        for r in rivit:
+            if isinstance(r, dict) and r.get("id") == uusi["id"]:
+                ulos.append(uusi)
+                korvattu = True
+            else:
+                ulos.append(r)
+        if not korvattu:
+            if len(omat) >= self.AUTOMAATIO_KATTO:
+                raise Hylatty("liikaa_automaatioita")
+            ulos.append(uusi)
+        await self.hass.async_add_executor_job(self._kirjoita_automaatiot, ulos)
+        await self._lataa_automaatiot()
+        return {"id": uusi["id"], "korvattu": korvattu, "yhteensa": len(ulos),
+                "klevran": len(omat) + (0 if korvattu else 1)}
+
+    async def _automaatiot(self, _tiedot):
+        """Mitä Home Assistantissa on — Klevran omat eriteltynä."""
+        try:
+            rivit = await self.hass.async_add_executor_job(self._lue_automaatiot)
+        except Hylatty:
+            raise
+        klevran, muut = [], 0
+        for r in rivit:
+            if not isinstance(r, dict):
+                continue
+            tid = str(r.get("id") or "")
+            if tid.startswith(self.AUTOMAATIO_ETULIITE):
+                tila = self.hass.states.get("automation." + str(r.get("alias") or "")
+                                            .lower().replace(" ", "_"))
+                klevran.append({
+                    "id": tid,
+                    "tunnus": tid[len(self.AUTOMAATIO_ETULIITE):],
+                    "nimi": str(r.get("alias") or "")[:80],
+                    "paalla": (tila.state == "on") if tila is not None else None,
+                })
+            else:
+                muut += 1
+        # 🔴 KERROTAAN JOS LATAUS EI VOI TOIMIA. Jos `automation:` ei ole
+        # mukana configuration.yaml:ssä, tiedostoon kirjoitettu rivi ei päädy
+        # mihinkään — ja Klevra näyttäisi onnistuneen.
+        palvelu_on = self.hass.services.has_service("automation", "reload")
+        return {"klevran": klevran, "muita": muut, "lataus_mahdollinen": bool(palvelu_on),
+                "tiedosto": self._automaatiotiedosto()}
+
+    async def _automaatio_poista(self, tiedot):
+        tunnus = str(tiedot.get("tunnus") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", tunnus):
+            raise Hylatty("tunnus_ei_kelpaa")
+        kohde = self.AUTOMAATIO_ETULIITE + tunnus
+        rivit = await self.hass.async_add_executor_job(self._lue_automaatiot)
+        jaljelle = [r for r in rivit
+                    if not (isinstance(r, dict) and r.get("id") == kohde)]
+        if len(jaljelle) == len(rivit):
+            raise Hylatty("automaatiota_ei_loydy")
+        await self.hass.async_add_executor_job(self._kirjoita_automaatiot, jaljelle)
+        await self._lataa_automaatiot()
+        return {"id": kohde, "poistettu": True, "yhteensa": len(jaljelle)}
 
     # ── Verkkoon kytketyn radion etsintä ─────────────────────────────────────
     #

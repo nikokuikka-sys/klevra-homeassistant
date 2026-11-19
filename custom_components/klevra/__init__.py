@@ -41,7 +41,6 @@ from .const import (
     ATTR_MERKKI_KATTO,
     DOMAIN,
     HALLINTA_VERSIO,
-    KIELLETYT_KENTAT,
     LISAOSA_VERSIO,
     KIINNOSTAVAT,
     ODOTUS_S,
@@ -49,10 +48,9 @@ from .const import (
     OLETUS_VALI,
     OTSAKE,
     POLKU_HAVAINNOT,
-    SALLITUT,
     VIRHE_KATTO_S,
 )
-from .hallinta import Hallinta
+from .hallinta import Hallinta, puhdista_tiedot, tarkista_palvelu
 from .liitos import vahdi
 
 _LOGGER = logging.getLogger(__name__)
@@ -281,24 +279,19 @@ class Klevrasilta:
                 _LOGGER.warning("Klevra: vaillinainen komento, ohitetaan")
                 return
 
-            domain, nimi = palvelu.split(".", 1)
-
-            # 🔴 KAKSI PORTTIA, JA KUMPIKIN TARVITAAN.
-            # 1) palvelu on domainin sallitulla listalla
-            if nimi not in SALLITUT.get(domain, set()):
-                _LOGGER.warning("Klevra: palvelu %s ei ole sallittu, ohitetaan", palvelu)
-                return
-            # 2) palvelun domain on sama kuin entiteetin domain
-            #    Ilman tätä `climate.set_temperature` menisi water_heater-
-            #    entiteetille — sama vika kuin palvelimella 10.11.2026.
-            if entiteetti.split(".")[0] != domain:
+            # 🔴 KAKSI PORTTIA, JA KUMPIKIN TARVITAAN — mutta ne EIVÄT OLE
+            # TÄÄLLÄ. Sääntö on `hallinta.tarkista_palvelu`:ssa, koska sillä on
+            # kolme kutsujaa: suora komento (tämä), automaation kirjoitus ja
+            # tuleva paikallinen ohjaus. Kolme kopiota ajautuu erilleen; kolmas
+            # kopio ajautuu ensimmäisenä. [SALMI 19.11.2026]
+            pari, syy = tarkista_palvelu(entiteetti, palvelu)
+            if pari is None:
                 _LOGGER.warning(
-                    "Klevra: %s ei sovi entiteetille %s, ohitetaan", palvelu, entiteetti
+                    "Klevra: %s / %s hylattiin (%s), ohitetaan", palvelu, entiteetti, syy
                 )
                 return
-
-            puhdas = {k: v for k, v in tiedot.items() if k not in KIELLETYT_KENTAT}
-            puhdas["entity_id"] = entiteetti
+            domain, nimi = pari
+            puhdas = puhdista_tiedot(tiedot, entiteetti)
 
             await self.hass.services.async_call(domain, nimi, puhdas, blocking=False)
         except Exception as e:  # noqa: BLE001

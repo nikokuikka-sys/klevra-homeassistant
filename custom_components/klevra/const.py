@@ -101,8 +101,8 @@ KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
 #
 # 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
 # Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
-HALLINTA_VERSIO = 3
-LISAOSA_VERSIO = "1.6.0"
+HALLINTA_VERSIO = 4
+LISAOSA_VERSIO = "1.7.0"
 HALLINTA_TOIMINNOT = (
     "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
     "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)
@@ -125,6 +125,12 @@ HALLINTA_TOIMINNOT = (
     # ── 1.6.0 (HALLINTA_VERSIO 3): radiot, signaali ja verkkoradion etsintä ──
     "radiot",          # antenni → vahvistimet → päätelaitteet, LQI/RSSI
     "etsi_radio",      # verkkoon kytketty Zigbee-radio ja sen socket-osoite
+    # ── 1.7.0 (HALLINTA_VERSIO 4): automaatiot Home Assistantiin ──
+    # 🔴 Tänne kirjoitettu ajastus ajetaan RASPBERRYLLÄ: se laukeaa vaikka
+    # internetyhteys olisi poikki. Klevran oma ajastin pyörii Renderissä.
+    "automaatiot",         # mitä HA:ssa on — Klevran omat eriteltynä
+    "automaatio_kirjoita", # Klevran ajastus → HA:n automations.yaml
+    "automaatio_poista",   # Klevran oma rivi pois (ei koske muihin)
 )
 
 # 🔴 TARKISTETTU LUETTELO. Käyttäjän ALOITTAMA lisäys on mahdollinen vain
