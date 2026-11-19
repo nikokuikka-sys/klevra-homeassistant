@@ -102,7 +102,7 @@ KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
 # 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
 # Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
 HALLINTA_VERSIO = 6
-LISAOSA_VERSIO = "1.9.0"
+LISAOSA_VERSIO = "1.10.0"
 HALLINTA_TOIMINNOT = (
     "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
     "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)

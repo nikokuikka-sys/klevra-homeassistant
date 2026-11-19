@@ -55,6 +55,31 @@ LIITOS_TIEDOSTOT = (
     "/data/klevra-liitos.json",
 )
 
+# 💳 ESIPROVISIOIDUN KORTIN OMAT TIEDOT. [Niko 19.11.2026 klo 14.55]
+#
+# 🔴 TÄMÄ ON SE KOLMAS LÄHDE, JOKA POISTAA AGENTIN TARPEEN. Tämän moduulin
+# alkuperäinen suunnitelma (yllä, askel 4) odotti laitteen omaa agenttia, joka
+# kirjoittaa tunnuksen tiedostoon palvelimen työnnöstä. Mitattu 19.11.2026:
+#   • agenttia EI ole tässä repossa eikä missään
+#   • muokkaamattomaan Home Assistant OS:iin EI voi lisätä palvelua, joten
+#     agenttia ei voi edes asentaa ilman että käyttöjärjestelmästä tehdään
+#     oma haara — ja silloin me omistamme sen turvapäivitykset
+#   • laite on asiakkaan NATin takana, joten palvelin ei voi työntää sille
+#     mitään; tiedon on kuljettava VEDOLLA
+#
+# Siksi integraatio kysyy itse. Kortille kirjoitetaan kirjoitushetkellä
+# `laite` + `salaisuus`, ja tämä moduuli kysyy palvelimelta «olenko liitetty».
+# Ei agenttia, ei käyttöjärjestelmän muokkausta, ei työntöä.
+#
+# 🔴 SALAISUUS EI MENE LOKIIN EIKÄ TARRAAN. Tarrassa on lunastuskoodi, joka on
+# eri asia: se ei anna tunnusta, se vain sitoo laitteen asiakkaan kotiin.
+LAITE_TIEDOSTOT = (
+    "/config/klevra-laite.json",
+    "/share/klevra/laite.json",
+    "/data/klevra-laite.json",
+)
+POLKU_KORTTI = "/api/kortti/tila"
+
 # Vahdin väli. Alkaa tästä ja venyy kattoon, jos mitään ei löydy: laite voi
 # seisoa nurkassa viikon ennen kuin QR skannataan, eikä se saa jauhaa turhaan.
 VALI_S = 10
@@ -132,6 +157,145 @@ def lue_liitos(tiedostot=None, ymparisto=None):
     return None
 
 
+def lue_laitetiedot(tiedostot=None, ymparisto=None):
+    """Kortille kirjoitetut laitetiedot: {laite, salaisuus, palvelin}.
+
+    🔴 EI OSITTAISTA. Jos kortilta löytyy laitetunnus ilman salaisuutta (tai
+    toisin päin), sitä ei palauteta puolivalmiina: palvelinkysely ilman
+    salaisuutta ei voi onnistua, ja puolivalmis arvo saisi vahdin kysymään
+    turhaan ikuisesti.
+    """
+    ymp = os.environ if ymparisto is None else ymparisto
+    laite = str(ymp.get("KLEVRA_LAITE") or "").strip()
+    salaisuus = str(ymp.get("KLEVRA_SALAISUUS") or "").strip()
+    if laite and salaisuus:
+        return {
+            "laite": laite,
+            "salaisuus": salaisuus,
+            "palvelin": siisti_palvelin(ymp.get("KLEVRA_PALVELIN")) or OLETUS_PALVELIN,
+            "lahde": "ymparisto:KLEVRA_LAITE",
+        }
+    polut = list(LAITE_TIEDOSTOT if tiedostot is None else tiedostot)
+    oma = ymp.get("KLEVRA_LAITE_TIEDOSTO")
+    if oma:
+        polut.insert(0, oma)
+    for polku in polut:
+        try:
+            with open(polku, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        laite = str(d.get("laite") or d.get("laite_tunnus") or "").strip()
+        salaisuus = str(d.get("salaisuus") or "").strip()
+        if not laite or not salaisuus:
+            continue
+        return {
+            "laite": laite,
+            "salaisuus": salaisuus,
+            "palvelin": siisti_palvelin(d.get("palvelin")) or OLETUS_PALVELIN,
+            "lahde": polku,
+        }
+    return None
+
+
+def tallenna_palvelin(laitetiedot, uusi_osoite):
+    """Kirjoita uusi palvelinosoite laitetiedostoon. True jos onnistui.
+
+    🔴 SIVUVAIKUTUS, EI EHTO. Jos kirjoitus ei onnistu, liitos tehdään silti
+    vanhalla osoitteella — ja uusi yritetään taas seuraavalla kierroksella.
+    Kaatuva kirjoitus ei saa estää liittymistä.
+
+    🔴 SALAISUUS SÄILYY, EIKÄ SITÄ LOKITETA. Tiedosto kirjoitetaan kokonaan
+    uudelleen, joten salaisuus on mukana — mutta vain tiedostossa.
+    """
+    polku = laitetiedot.get("lahde")
+    if not polku or not str(polku).startswith("/"):
+        # Ympäristömuuttujasta tullutta ei kirjoiteta levylle: se on kokeilu,
+        # ja sen ylikirjoittaminen tiedostoksi yllättäisi kokeilijan.
+        return False
+    try:
+        with open(polku, "w", encoding="utf-8") as f:
+            json.dump({
+                "laite": laitetiedot["laite"],
+                "salaisuus": laitetiedot["salaisuus"],
+                "palvelin": uusi_osoite,
+                "_ohje": "Klevra Home -laitetunniste. Palvelinosoite paivitetty automaattisesti.",
+            }, f, indent=2)
+        laitetiedot["palvelin"] = uusi_osoite
+        return True
+    except OSError:
+        _LOGGER.warning("Klevra: uutta palvelinosoitetta ei voitu kirjoittaa tiedostoon %s", polku)
+        return False
+
+
+async def nouda_palvelimelta(hass, laitetiedot, hae=None):
+    """Kysy palvelimelta onko kortti liitetty. Palauttaa liitoksen tai None.
+
+    🔴 EI MITÄÄN EI OLE VIRHE. Liittämätön kortti saa `odottaa`, ja se on
+    normaali tila viikkoja: laite voi seisoa varastossa. Siksi tästä ei
+    nouse virhettä eikä lokiin tule rivi joka kierroksella.
+    """
+    if not laitetiedot:
+        return None
+    osoite = laitetiedot["palvelin"].rstrip("/") + POLKU_KORTTI
+    runko = {"laite": laitetiedot["laite"], "salaisuus": laitetiedot["salaisuus"]}
+    try:
+        if hae is not None:
+            d = await hae(osoite, runko)
+        else:
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+            istunto = async_get_clientsession(hass)
+            vastaus = await istunto.post(osoite, json=runko, timeout=20)
+            if vastaus.status != 200:
+                return None
+            d = await vastaus.json()
+    except Exception:  # noqa: BLE001
+        # Sivuvaikutus: verkko on poikki tai palvelin alhaalla. Kortti yrittää
+        # uudelleen seuraavalla kierroksella; tämä ei saa kaataa käynnistystä.
+        return None
+    # ═══ 🌐 PALVELIN VAIHTUI ════════════════════════════════════════════════
+    # [Niko 19.11.2026 klo 16.44: «ne tullaan vaihtamaan myöhemmin
+    #  tulevaisuudessa».]
+    #
+    # 🔴 KORTILLE LEIVOTTU OSOITE ON PYSYVÄ PÄÄTÖS. Kortti kysyy sitä vuosia.
+    # Jos domain vaihtuu eikä laite voi oppia uutta, kentällä oleva kortti
+    # lakkaa liittymästä — ja se ei näy mistään: kortti vain odottaa.
+    #
+    # Siksi vastaus voi kertoa uuden osoitteen. Laite kirjoittaa sen omaan
+    # tiedostoonsa ja käyttää sitä jatkossa.
+    #
+    # 🔴 TÄMÄ ON OHJAUSPRIMITIIVI, JOTEN SE ON RAJATTU KOLMELLA TAVALLA:
+    #   1. vain https (muuten kaappausreitti: kerran väärään vastaukseen
+    #      uskova kortti olisi pysyvästi väärällä palvelimella)
+    #   2. uusi osoite EI korvaa vanhaa muistissa tällä kierroksella — vanha
+    #      jää varalle, jos uusi ei vastaa
+    #   3. kirjoitus levylle on sivuvaikutus: jos se ei onnistu (levy täynnä,
+    #      kirjoitussuojattu), liitos tehdään silti vanhalla osoitteella
+    if isinstance(d, dict):
+        uusi_osoite = siisti_palvelin(d.get("palvelin_uusi"))
+        if uusi_osoite and uusi_osoite.startswith("https://") and uusi_osoite != laitetiedot["palvelin"]:
+            _LOGGER.info("Klevra: palvelin siirtyi osoitteeseen %s", uusi_osoite)
+            tallenna_palvelin(laitetiedot, uusi_osoite)
+
+    if not isinstance(d, dict) or d.get("tila") != "liitetty":
+        return None
+    tunnus = siisti_tunnus(d.get("tunnus"))
+    if not tunnus:
+        # 🔴 «liitetty» ilman kelvollista tunnusta on palvelimen vika, ei
+        # liitos. Sitä ei saa tulkita onnistumiseksi: asennus syntyisi
+        # tunnuksella jota ei ole, ja se näyttäisi toimivalta.
+        _LOGGER.warning("Klevra: palvelin sanoi liitetty mutta tunnus ei kelpaa")
+        return None
+    return {
+        "tunnus": tunnus,
+        "palvelin": siisti_palvelin(d.get("palvelin")) or laitetiedot["palvelin"],
+        "lahde": "kortti:" + str(laitetiedot["laite"]),
+    }
+
+
 def pyyhi_tunnus(polku):
     """Tunnus pois levyltä kun asennus on syntynyt. True jos pyyhittiin.
 
@@ -184,20 +348,38 @@ async def liita(hass, liitos):
     return False
 
 
-async def vahdi(hass, tiedostot=None, ymparisto=None, vali=VALI_S, katto=VALI_KATTO_S, kierroksia=None):
+async def vahdi(hass, tiedostot=None, ymparisto=None, vali=VALI_S, katto=VALI_KATTO_S,
+                kierroksia=None, laitetiedostot=None, hae=None):
     """Odota tunnusta ja liity heti kun se tulee. Palauttaa kierrosten määrän.
 
-    `kierroksia` on vartijaa varten: ilman sitä vahti jatkaa kunnes liitos
-    syntyy. Tuotannossa tämä on taustatehtävä, joka päättyy kun kortti on
-    liitetty — tai kun Home Assistant sammuu.
+    Kaksi lähdettä, tässä järjestyksessä joka kierroksella:
+
+      1. PAIKALLINEN TUNNUS (`lue_liitos`) — ympäristömuuttuja tai tiedosto.
+         Nopea, ei vaadi verkkoa, ja sillä voi kokeilla korttia käsin.
+      2. 💳 KORTIN OMA KYSELY (`nouda_palvelimelta`) — laitetunnus ja
+         salaisuus kortilta, vastaus palvelimelta.
+
+    🔴 PAIKALLINEN ENSIN, JA SE ON PÄÄTÖS. Jos kortille on käsin kirjoitettu
+    tunnus (vianetsintä, koeajo), se voittaa palvelimen vastauksen. Muuten
+    käsin tehty korjaus ei vaikuttaisi mihinkään, ja korjaaja luulisi
+    tehneensä jotain.
+
+    🔴 VERKKOKYSELY EI SAA HIDASTAA ENSIMMÄISTÄ KIERROSTA TURHAAN: jos
+    laitetietoja ei ole kortilla lainkaan, kyselyä ei tehdä kertaakaan.
+
+    `kierroksia` ja `hae` ovat vartijaa varten: ilman niitä vahti jatkaa
+    kunnes liitos syntyy ja käyttää HA:n omaa istuntoa.
     """
     v = vali
     n = 0
+    laitetiedot = lue_laitetiedot(laitetiedostot, ymparisto)
     while kierroksia is None or n < kierroksia:
         n += 1
         if jo_asennettu(hass):
             return n
         liitos = lue_liitos(tiedostot, ymparisto)
+        if liitos is None and laitetiedot is not None:
+            liitos = await nouda_palvelimelta(hass, laitetiedot, hae=hae)
         if liitos and await liita(hass, liitos):
             pyyhi_tunnus(liitos["lahde"] if str(liitos["lahde"]).startswith("/") else None)
             return n
