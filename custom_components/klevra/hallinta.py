@@ -935,9 +935,61 @@ class Hallinta:
     async def _lataa_automaatiot(self):
         await self.hass.services.async_call("automation", "reload", blocking=True)
 
+    def _kerta_paivasta(self, rivi):
+        """Rivin kerta-ajastuksen päivä, tai None jos se ei ole kerta.
+
+        🔴 EPÄVARMUUS EI POISTA. Jos ehtoa ei voi lukea, rivi ei ole
+        tunnistettu kerta-ajastus — eikä sitä siivota. Väärä poisto on
+        peruuttamaton; väärä säilytys on korkeintaan yksi rivi liikaa.
+        """
+        if not isinstance(rivi, dict):
+            return None
+        for ehto in (rivi.get("condition") or []):
+            if not isinstance(ehto, dict):
+                continue
+            osuma = re.search(r"==\s*'(20\d{2}-\d{2}-\d{2})'",
+                              str(ehto.get("value_template") or ""))
+            if osuma:
+                return osuma.group(1)
+        return None
+
+    def _siivoa_vanhentuneet(self, rivit):
+        """Vanhentuneet KLEVRAN OMAT kerta-ajastukset pois. (jäljelle, siivotut)
+
+        🔴 KOLME EHTOA, KAIKKI PAKOLLISIA: rivin tunnus alkaa `klevra_`, siitä
+        on luettu kerta-ajastuksen päivä, ja se päivä on AIDOSTI ennen tätä
+        päivää HA:n omassa vyöhykkeessä. Käyttäjän oma rivi, Klevran toistuva
+        rivi, tämän päivän kerta ja tulevan päivän kerta eivät kuulu joukkoon.
+
+        🔴 MIKSI TÄMÄ ON OLEMASSA: `AUTOMAATIO_KATTO` on 100. Kerta-ajastus jää
+        tiedostoon päivänsä jälkeen inerttinä — se ei laukea, mutta se täyttää
+        katon. Ilman siivousta käyttäjä törmäisi `liikaa_automaatioita`:an
+        tietämättä miksi.
+
+        🔴 TÄMÄ EI SAA KOSKAAN ESTÄÄ KIRJOITUSTA. Jos päivän tulkinta
+        epäonnistuu, riviä ei poisteta eikä virhettä nosteta.
+        """
+        tanaan = self._paikallinen_paiva()
+        jaljelle, siivotut = [], []
+        for r in rivit:
+            try:
+                tid = str(r.get("id") or "") if isinstance(r, dict) else ""
+                paiva = self._kerta_paivasta(r)
+                if (tid.startswith(self.AUTOMAATIO_ETULIITE)
+                        and paiva is not None and paiva < tanaan):
+                    siivotut.append(tid[len(self.AUTOMAATIO_ETULIITE):])
+                    continue
+            except Exception:  # noqa: BLE001
+                pass  # epävarmuus säilyttää rivin
+            jaljelle.append(r)
+        return jaljelle, siivotut
+
     async def _automaatio_kirjoita(self, tiedot):
         uusi = self._automaatio_yaml(tiedot)
         rivit = await self.hass.async_add_executor_job(self._lue_automaatiot)
+        # 🔴 SIIVOUS ENNEN KATON TARKISTUSTA. Muuten sata kuollutta riviä
+        # estäisi uuden kirjoittamisen, vaikka siivous teki juuri tilaa.
+        rivit, siivotut = self._siivoa_vanhentuneet(rivit)
         omat = [r for r in rivit if isinstance(r, dict)
                 and str(r.get("id") or "").startswith(self.AUTOMAATIO_ETULIITE)]
         korvattu = False
@@ -954,7 +1006,10 @@ class Hallinta:
             ulos.append(uusi)
         await self.hass.async_add_executor_job(self._kirjoita_automaatiot, ulos)
         await self._lataa_automaatiot()
+        # 🔴 SIIVOTUT KERROTAAN. Hiljainen poisto on sama vika kuin hiljainen
+        # ylikirjoitus: se ei näy mistään ennen kuin jotain puuttuu.
         return {"id": uusi["id"], "korvattu": korvattu, "yhteensa": len(ulos),
+                "siivotut": siivotut,
                 "klevran": len(omat) + (0 if korvattu else 1)}
 
     def _paikallinen_paiva(self, hetki=None):
@@ -1004,15 +1059,10 @@ class Hallinta:
                 # `automations.yaml`:iin ja täyttää katon (100). Ilman tätä
                 # kenttää Klevra ei voisi tietää mikä rivi on vanhentunut, ja
                 # käyttäjän lista kasvaisi kuolleista automaatioista.
-                kerta = None
-                for ehto in (r.get("condition") or []):
-                    if not isinstance(ehto, dict):
-                        continue
-                    osuma = re.search(r"==\s*'(20\d{2}-\d{2}-\d{2})'",
-                                      str(ehto.get("value_template") or ""))
-                    if osuma:
-                        kerta = osuma.group(1)
-                        break
+                # 🔴 SAMA TULKINTA KUIN SIIVOUKSESSA, yksi funktio. Kaksi
+                # kopiota samasta säännöstä ajautuisi erilleen, ja silloin
+                # luettelo näyttäisi eri rivejä kuin siivous poistaa.
+                kerta = self._kerta_paivasta(r)
                 klevran.append({
                     "id": tid,
                     "tunnus": tid[len(self.AUTOMAATIO_ETULIITE):],

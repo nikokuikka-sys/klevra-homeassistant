@@ -1,0 +1,10 @@
+# 🔴 Kaannetty bytecode ei kuulu julkiseen lisaosarepoon.
+# 19.11.2026: `__pycache__/*.pyc` paatyi versioon 1.8.0, koska julkaisun OMA
+# tarkistusvaihe (`python3 -m py_compile`) loi ne juuri ennen `git add -A`:ta.
+# Tarkistus saastutti sen mita se tarkisti. Vanhentunut .pyc voi varjostaa
+# lahdekoodin Home Assistantissa, joten se ei ole pelkka siisteysasia.
+# Kaanna jatkossa: PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile ...
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
