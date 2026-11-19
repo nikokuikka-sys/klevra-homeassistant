@@ -832,7 +832,30 @@ class Hallinta:
             raise Hylatty("tunnus_ei_kelpaa")
         nimi = str(tiedot.get("nimi") or "Klevra-ajastus")[:80]
 
+        # 🔴 KERTA-AJASTUS: PÄIVÄ LUKITSEE AUTOMAATION YHTEEN VUOROKAUTEEN.
+        # Home Assistantin `platform: time` laukeaa JOKA päivä. Ilman tätä
+        # lukitusta «pese tänä yönä» pesisi joka yö, hiljaa, kunnes käyttäjä
+        # huomaisi sen sähkölaskusta. Päivä tarkistetaan muotoa myöten, koska
+        # se menee ehtolausekkeeseen: mikä tahansa muu merkki kuin numero tai
+        # väliviiva hylätään ennen kuin se päätyy templaattiin.
+        paiva = tiedot.get("paiva")
+        kertaehto = None
+        if paiva is not None:
+            paiva = str(paiva).strip()
+            if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])", paiva):
+                raise Hylatty("paiva_ei_kelpaa")
+            kertaehto = {
+                "condition": "template",
+                "value_template": "{{ now().strftime('%%Y-%%m-%%d') == '%s' }}" % paiva,
+            }
+
         paivat = tiedot.get("paivat")
+        # 🔴 KERTA JA TOISTO OVAT ERI ASIOITA, EIKÄ NIITÄ YHDISTETÄ. Jos sama
+        # paketti kantaisi sekä päivämäärän että viikonpäivälistan, toinen
+        # kertoisi «kerran» ja toinen «joka tiistai» — ja kumpi voittaa
+        # selviäisi vasta siitä kumpi laukesi.
+        if kertaehto is not None and paivat is not None:
+            raise Hylatty("kerta_ja_toisto_yhdessa")
         if paivat is None:
             viikonpaivat = list(self.VIIKONPAIVAT)
         else:
@@ -898,10 +921,13 @@ class Hallinta:
             # 🔴 KUVAUS KERTOO OMISTAJAN. Käyttäjä, joka avaa Home Assistantin
             # automaatiolistan, näkee heti mikä rivi on Klevran kirjoittama ja
             # mikä hänen omansa.
-            "description": "Klevran kirjoittama. Muokkaa Klevrassa — tämä rivi korvataan.",
+            "description": ("Klevran kirjoittama kerta-ajastus %s. Muokkaa Klevrassa — tämä rivi korvataan." % paiva
+                            if kertaehto is not None
+                            else "Klevran kirjoittama. Muokkaa Klevrassa — tämä rivi korvataan."),
             "mode": "single",
             "trigger": [laukaisu],
-            "condition": ([{"condition": "time", "weekday": viikonpaivat}]
+            "condition": ([kertaehto] if kertaehto is not None
+                          else [{"condition": "time", "weekday": viikonpaivat}]
                           if len(viikonpaivat) < 7 else []),
             "action": askeleet,
         }
@@ -931,6 +957,34 @@ class Hallinta:
         return {"id": uusi["id"], "korvattu": korvattu, "yhteensa": len(ulos),
                 "klevran": len(omat) + (0 if korvattu else 1)}
 
+    def _paikallinen_paiva(self, hetki=None):
+        """Tämä päivä Home Assistantin omassa aikavyöhykkeessä.
+
+        🔴 EI UTC. Kerta-ajastuksen ehto vertaa HA:n `now()`:ta, joka on
+        paikallinen. Jos vanhentuminen laskettaisiin UTC:stä, Suomen talvessa
+        kahden tunnin ja kesässä kolmen tunnin ikkuna vuorokauden vaihteessa
+        kertoisi väärää — ja juuri siinä ikkunassa yöpesut ajastetaan.
+
+        🔴 HETKI TULEE PARAMETRINA, KOSKA MUUTEN TÄTÄ EI VOI MITATA. Mitattu
+        19.11.2026: UTC-sabotaasi EI osunut, koska vartija ajettiin klo 10
+        Suomen aikaa — silloin UTC ja Suomi ovat samassa päivässä, ja väärä
+        toteutus näytti oikealta. Vartija on siis vihreä väärästä syystä 22
+        tuntia vuorokaudesta. Nyt vyöhyke-ero mitataan hetkellä, jossa se on
+        olemassa: 00.30 Suomen aikaa on UTC:ssa edellinen päivä.
+        """
+        from datetime import datetime, timezone
+        vyohyke = None
+        try:
+            nimi = getattr(getattr(self.hass, "config", None), "time_zone", None)
+            if nimi:
+                from zoneinfo import ZoneInfo
+                vyohyke = ZoneInfo(str(nimi))
+        except Exception:  # noqa: BLE001
+            # Tuntematon vyöhykenimi: UTC on huonompi mutta ei väärempi kuin kaatuminen.
+            vyohyke = None
+        kello = hetki if hetki is not None else datetime.now(timezone.utc)
+        return kello.astimezone(vyohyke or timezone.utc).strftime("%Y-%m-%d")
+
     async def _automaatiot(self, _tiedot):
         """Mitä Home Assistantissa on — Klevran omat eriteltynä."""
         try:
@@ -945,11 +999,28 @@ class Hallinta:
             if tid.startswith(self.AUTOMAATIO_ETULIITE):
                 tila = self.hass.states.get("automation." + str(r.get("alias") or "")
                                             .lower().replace(" ", "_"))
+                # 🔴 KERTA-AJASTUS KERROTAAN, JOTTA SE VOIDAAN SIIVOTA. Päivän
+                # jälkeen rivi on inertti: se ei laukea, mutta se jää
+                # `automations.yaml`:iin ja täyttää katon (100). Ilman tätä
+                # kenttää Klevra ei voisi tietää mikä rivi on vanhentunut, ja
+                # käyttäjän lista kasvaisi kuolleista automaatioista.
+                kerta = None
+                for ehto in (r.get("condition") or []):
+                    if not isinstance(ehto, dict):
+                        continue
+                    osuma = re.search(r"==\s*'(20\d{2}-\d{2}-\d{2})'",
+                                      str(ehto.get("value_template") or ""))
+                    if osuma:
+                        kerta = osuma.group(1)
+                        break
                 klevran.append({
                     "id": tid,
                     "tunnus": tid[len(self.AUTOMAATIO_ETULIITE):],
                     "nimi": str(r.get("alias") or "")[:80],
                     "paalla": (tila.state == "on") if tila is not None else None,
+                    "kerta_paiva": kerta,
+                    "vanhentunut": (kerta is not None
+                                    and kerta < self._paikallinen_paiva()),
                 })
             else:
                 muut += 1
