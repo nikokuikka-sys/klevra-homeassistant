@@ -1,0 +1,59 @@
+# 🚀 JULKAISU AUTOMAATTISESTI MANIFESTIN VERSIOSTA
+#
+# [Niko 19.11.2026: «mitä tarvitset että pääset ottamaan yhteyden ettei
+#  minun tarvitse tehdä manuaalisesti».]
+#
+# 🔴 MIKSI TÄMÄ ON OLEMASSA. Klevraa kehittävä istunto saa pushata tähän
+# reppuun, mutta EI luoda tageja eikä julkaisuja — ne on estetty istunnon
+# tasolla, ei repon oikeuksilla. Ilman julkaisua HACS ei koskaan tarjoa
+# päivitystä, ja jokainen korjaus jää kotiin kunnes joku muistaa Redownloadin.
+#
+# Tämä työnkulku tekee sen GitHubin omalla tunnuksella: manifestin versio
+# muuttuu → tag + julkaisu syntyy itsestään. Repo on JULKINEN, joten
+# Actions-minuutit ovat ilmaisia eivätkä kuluta Nikon budjettia.
+name: Julkaise versio
+
+on:
+  push:
+    branches: [main]
+    paths: ['custom_components/klevra/manifest.json']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  julkaise:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lue versio manifestista
+        id: versio
+        run: |
+          V=$(python3 -c "import json;print(json.load(open('custom_components/klevra/manifest.json'))['version'])")
+          echo "versio=$V" >> "$GITHUB_OUTPUT"
+          echo "Manifestin versio: $V"
+
+      - name: Luo julkaisu, jos sitä ei vielä ole
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.versio.outputs.versio }}"
+          # 🔴 EI YLIKIRJOITETA OLEMASSA OLEVAA. Jo julkaistua versiota ei
+          # muuteta: HACS on voinut jo ladata sen, ja sisällön vaihtaminen
+          # saman tagin alla tarkoittaisi että kahdella käyttäjällä on eri
+          # koodi samalla versionumerolla.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Julkaisu $TAG on jo olemassa — ei tehdä mitään."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Klevra Home ${{ steps.versio.outputs.versio }}" \
+            --notes "Klevra Home -lisäosa ${{ steps.versio.outputs.versio }}.
+
+          Päivitys HACSista: HACS → Klevra Home → Update.
+
+          Muutokset: https://github.com/${{ github.repository }}/commits/main"
+          echo "Julkaistu $TAG."
