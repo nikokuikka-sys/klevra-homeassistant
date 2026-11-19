@@ -477,6 +477,350 @@ class Hallinta:
         dr.async_update_device(laite.id, **muutos)
         return {"laite_id": laite.id, "muutettu": sorted(muutos)}
 
+    # ── Radiot ja signaali ───────────────────────────────────────────────────
+    #
+    # 📡 [Niko 19.11.2026 klo 06.06: «Mistä tiedän että tuo radio antenni toimii
+    #  ja löytyy? … kohta joka erottelee nämä vahvistimet ja antennit niiden
+    #  tilan ja sen alla laitteiden signaali».]
+    #
+    # Kolme kerrosta: ANTENNI (koordinaattori) → VAHVISTIN (reititin, verkkovirta)
+    # → PÄÄTELAITE (paristo). Zigbeessä nämä ovat laitteen oikea tyyppi, ei
+    # arvaus — mutta vain jos ZHA:n portti saadaan auki.
+    #
+    # 🔴 KAKSI LÄHDETTÄ, JA KUMPI KÄYTETTIIN KERROTAAN. ZHA:n sisäinen rajapinta
+    # on vaihtunut HA-versioiden välillä (hass.data["zha"] → helpers.get_zha_gateway
+    # → zha-kirjasto). Jos se ei aukea, palataan laiterekisteriin — ja silloin
+    # tyyppi on PÄÄTTELY, ei mittaus. Kumpikin merkitään `laatu`-kenttään, koska
+    # «vahvistin» väärällä laitteella lähettää Nikon siirtämään pistorasiaa
+    # turhaan.
+    #
+    # 🔴 PUUTTUVA SIGNAALI EI OLE NOLLA. `lqi: None` = laite ei kerro. `lqi: 0`
+    # = linkki on poikki. Nämä EIVÄT saa näyttää samalta; sama sääntö kuin
+    # kodinkoneissa (src/services/kodinkoneet.js).
+
+    @staticmethod
+    def _luku(x, ala, yla):
+        try:
+            n = int(round(float(x)))
+        except Exception:  # noqa: BLE001  ei luku = ei mittausta
+            return None
+        return n if ala <= n <= yla else None
+
+    @staticmethod
+    def _leima(x):
+        """ZHA:n `last_seen` on epoch-sekunteja tai datetime. ISO ulos, tai None."""
+        if x is None:
+            return None
+        try:
+            if hasattr(x, "isoformat"):
+                return x.isoformat()
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(float(x), tz=timezone.utc).isoformat()
+        except Exception:  # noqa: BLE001  aika on tieto, ei edellytys
+            return None
+
+    def _zha_gateway(self):
+        """ZHA:n portti, tai None. Kolme tunnettua tapaa, uusin ensin."""
+        try:
+            from homeassistant.components.zha.helpers import get_zha_gateway
+            gw = get_zha_gateway(self.hass)
+            if gw is not None:
+                return gw
+        except Exception:  # noqa: BLE001  vanha ZHA tai ei asennettu
+            pass
+        try:
+            data = (getattr(self.hass, "data", None) or {}).get("zha") or {}
+            gw = data.get("zha_gateway") if isinstance(data, dict) else None
+            if gw is not None:
+                return gw
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    @staticmethod
+    def _zha_tyyppi(laite):
+        """koordinaattori | vahvistin | paate | None. Kysytään monta tapaa."""
+        for nimi, arvo in (("is_coordinator", "koordinaattori"),
+                           ("is_router", "vahvistin"),
+                           ("is_end_device", "paate")):
+            try:
+                if getattr(laite, nimi, None):
+                    return arvo
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            t = str(_arvo(getattr(laite, "device_type", None)) or "").lower()
+        except Exception:  # noqa: BLE001
+            return None
+        if "coordinator" in t:
+            return "koordinaattori"
+        if "router" in t:
+            return "vahvistin"
+        if "end" in t:
+            return "paate"
+        return None
+
+    def _radiot_zha(self, dr, alueet):
+        """ZHA:n portista. Palauttaa (solmut, kartta ieee→id) tai None."""
+        gw = self._zha_gateway()
+        if gw is None:
+            return None
+        try:
+            laitteet = list((getattr(gw, "devices", None) or {}).values())
+        except Exception:  # noqa: BLE001
+            return None
+        if not laitteet:
+            return None
+        solmut, idlla = [], {}
+        for z in laitteet:
+            ieee = str(_arvo(getattr(z, "ieee", None)) or "")
+            if not ieee:
+                continue
+            laite = None
+            try:
+                laite = dr.async_get_device(identifiers={("zha", ieee)})
+            except Exception:  # noqa: BLE001  rekisteri on lisätieto, ei edellytys
+                laite = None
+            tyyppi = self._zha_tyyppi(z)
+            s = {
+                "ieee": ieee,
+                "id": laite.id if laite is not None else None,
+                "nimi": str((laite.name_by_user if laite is not None else None)
+                            or (getattr(z, "name", None) or "")
+                            or ieee)[:80],
+                "huone": alueet.get(laite.area_id) if laite is not None else None,
+                "valmistaja": str(getattr(z, "manufacturer", None) or "")[:60] or None,
+                "malli": str(getattr(z, "model", None) or "")[:60] or None,
+                "tyyppi": tyyppi or "tuntematon",
+                "tyyppi_laatu": "mitattu" if tyyppi else "ei_tietoa",
+                "lqi": self._luku(getattr(z, "lqi", None), 0, 255),
+                "rssi": self._luku(getattr(z, "rssi", None), -128, 20),
+                "saatavilla": bool(getattr(z, "available", False)) if hasattr(z, "available") else None,
+                "viimeksi": self._leima(getattr(z, "last_seen", None)),
+                "isanta": None,
+                "lapsia": 0,
+                "paristo": None,
+            }
+            solmut.append(s)
+            idlla[ieee] = s
+        # Naapurit: lapsi-suhde kertoo MINKÄ vahvistimen kautta laite tulee.
+        for z in laitteet:
+            emo = str(_arvo(getattr(z, "ieee", None)) or "")
+            try:
+                naapurit = list(getattr(z, "neighbors", None) or ())
+            except Exception:  # noqa: BLE001  naapurit puuttuvat osassa versioita
+                naapurit = []
+            for n in naapurit:
+                try:
+                    suhde = str(_arvo(getattr(n, "relationship", None)) or "").lower()
+                    lapsi = str(_arvo(getattr(n, "ieee", None)) or "")
+                except Exception:  # noqa: BLE001
+                    continue
+                if "child" not in suhde or lapsi not in idlla or lapsi == emo:
+                    continue
+                idlla[lapsi]["isanta"] = emo
+        for s in solmut:
+            if s["isanta"] and s["isanta"] in idlla:
+                idlla[s["isanta"]]["lapsia"] += 1
+        return solmut
+
+    def _radiot_rekisteri(self, dr, er, alueet):
+        """Varatie: laiterekisteri + LQI/RSSI-entiteetit. Tyyppi on PÄÄTTELY."""
+        zha_entryt = {e.entry_id for e in self.hass.config_entries.async_entries("zha")}
+        if not zha_entryt:
+            return []
+        tilat = {}
+        paristot = set()
+        for ent in er.entities.values():
+            if not ent.device_id:
+                continue
+            nimi = str(ent.entity_id or "")
+            if nimi.endswith("_lqi") or nimi.endswith("_rssi"):
+                tila = self.hass.states.get(nimi)
+                if tila is not None:
+                    tilat.setdefault(ent.device_id, {})["rssi" if nimi.endswith("_rssi") else "lqi"] = tila.state
+            elif nimi.endswith("_battery") or nimi.endswith("_battery_level"):
+                paristot.add(ent.device_id)
+        solmut = []
+        for d in list(dr.devices.values()):
+            if not (set(d.config_entries or ()) & zha_entryt):
+                continue
+            mitat = tilat.get(d.id) or {}
+            paristo = d.id in paristot
+            solmut.append({
+                "ieee": None,
+                "id": d.id,
+                "nimi": str(d.name_by_user or d.name or "")[:80],
+                "huone": alueet.get(d.area_id),
+                "valmistaja": str(d.manufacturer or "")[:60] or None,
+                "malli": str(d.model or "")[:60] or None,
+                # 🔴 PÄÄTTELY, EI MITTAUS. Verkkovirtalaite EI ole takuulla
+                # reititin, ja siksi tyyppi jää «tuntematon» eikä «vahvistin».
+                "tyyppi": "paate" if paristo else "tuntematon",
+                "tyyppi_laatu": "paattely" if paristo else "ei_tietoa",
+                "lqi": self._luku(mitat.get("lqi"), 0, 255),
+                "rssi": self._luku(mitat.get("rssi"), -128, 20),
+                "saatavilla": None,
+                "viimeksi": None,
+                # Rekisterin via_device osoittaa koordinaattoriin.
+                "isanta": d.via_device_id or None,
+                "lapsia": 0,
+                "paristo": paristo,
+            })
+        # Koordinaattori: ZHA-laite johon muut osoittavat via_device'lla.
+        osoitetut = {s["isanta"] for s in solmut if s["isanta"]}
+        for s in solmut:
+            if s["id"] in osoitetut:
+                s["tyyppi"] = "koordinaattori"
+                s["tyyppi_laatu"] = "paattely"
+                s["isanta"] = None
+                s["lapsia"] = sum(1 for x in solmut if x["isanta"] == s["id"])
+        return solmut
+
+    def _muut_radiot(self):
+        """Thread-, Matter- ja SMLIGHT-merkinnät: oma radio ilman Zigbee-solmuja."""
+        ulos = []
+        for e in self.hass.config_entries.async_entries():
+            if e.domain not in ("thread", "otbr", "matter", "smlight"):
+                continue
+            ulos.append({
+                "domain": e.domain,
+                "otsikko": str(e.title or "")[:80],
+                "tila": str(_arvo(e.state)),
+                "poissa_kaytosta": bool(getattr(e, "disabled_by", None)),
+            })
+        return ulos
+
+    async def _radiot(self, _tiedot):
+        from homeassistant.helpers import area_registry, device_registry, entity_registry
+
+        dr = device_registry.async_get(self.hass)
+        er = entity_registry.async_get(self.hass)
+        ar = area_registry.async_get(self.hass)
+        alueet = {a.id: a.name for a in ar.async_list_areas()}
+
+        zigbee = bool(self.hass.config_entries.async_entries("zha"))
+        solmut, lahde, syy = [], None, None
+        if zigbee:
+            try:
+                solmut = self._radiot_zha(dr, alueet)
+            except Exception as e:  # noqa: BLE001  portti on lisäetu, ei edellytys
+                _LOGGER.debug("Klevra-radiot: ZHA-portti ei auennut: %s", e)
+                solmut = None
+            if solmut:
+                lahde = "zha"
+            else:
+                solmut = self._radiot_rekisteri(dr, er, alueet)
+                lahde = "rekisteri"
+                syy = "zha_portti_ei_auennut"
+        else:
+            syy = "zigbee_ei_kaytossa"
+
+        solmut = solmut or []
+        if len(solmut) > HALLINTA_LAITE_KATTO:
+            solmut = solmut[:HALLINTA_LAITE_KATTO]
+        solmut.sort(key=lambda s: ({"koordinaattori": 0, "vahvistin": 1, "paate": 2}.get(s["tyyppi"], 3),
+                                   (s["huone"] or "~"), s["nimi"].lower()))
+        return {
+            "lahde": lahde,
+            "syy": syy,
+            "zigbee": zigbee,
+            "solmut": solmut,
+            "muut": self._muut_radiot(),
+        }
+
+    # ── Verkkoon kytketyn radion etsintä ─────────────────────────────────────
+    #
+    # 📡 [Niko 19.11.2026 klo 06.11: «Miten tämän pystyisi automatisoimaan että
+    #  se löytää oikean osoitteen nyt se ei löydä koti verkostosta laitetta».]
+    #
+    # 🔴 EI VERKKOSKANNAUSTA. Osoite on jo Home Assistantissa: SMLIGHT-
+    # integraatio löysi SLZB-MR2:n mDNS:llä ja TALLENSI hostin omaan
+    # merkintäänsä. Skannaus olisi toinen, epävarmempi lähde samaan tietoon —
+    # ja skannaus kodin verkossa on asia jota lisäosa ei tee ilman pyyntöä.
+    #
+    # 🔴 ZHA:N «Select a serial port» NÄYTTÄÄ VAIN USB-TIKUT. Siksi lista on
+    # Nikon kuvassa tyhjä vaikka radio on verkossa ja HA puhuu sille. Tämä
+    # toiminto tuottaa sen yhden rivin jota ZHA kaipaa: socket://IP:6638.
+
+    # Verkkoradion oletusportti ja -asetukset. SMLIGHTin oma ohje (SLZB-OS):
+    # Zigbee-soketti 6638, EFR32MG21 = EZSP, oletusnopeus 115200.
+    RADIO_PORTTI = 6638
+    RADIO_TYYPPI = "ezsp"
+    RADIO_NOPEUS = 115200
+    # Integraatiot joiden merkinnässä on verkkoon kytketyn Zigbee-radion host.
+    RADIO_DOMAINIT = ("smlight",)
+
+    @staticmethod
+    def _host_merkinnasta(e):
+        """Hostin nimi config entryn datasta. Eri integraatiot, eri avain."""
+        data = dict(getattr(e, "data", None) or {})
+        for avain in ("host", "ip_address", "address", "hostname"):
+            arvo = str(data.get(avain) or "").strip()
+            if arvo:
+                return arvo[:80]
+        return None
+
+    async def _etsi_radio(self, _tiedot):
+        from homeassistant.helpers import device_registry, entity_registry
+
+        dr = device_registry.async_get(self.hass)
+        er = entity_registry.async_get(self.hass)
+        zha_kaytossa = bool(self.hass.config_entries.async_entries("zha"))
+        loydot = []
+        for e in self.hass.config_entries.async_entries():
+            if e.domain not in self.RADIO_DOMAINIT:
+                continue
+            host = self._host_merkinnasta(e)
+            # Radion omat mittaukset: laiteohjelma, radion tila, käyttöaika.
+            mittaukset = []
+            try:
+                laitteet = [d for d in dr.devices.values() if e.entry_id in (d.config_entries or ())]
+            except Exception:  # noqa: BLE001  rekisteri on lisätieto
+                laitteet = []
+            laite_idt = {d.id for d in laitteet}
+            for ent in er.entities.values():
+                if ent.device_id not in laite_idt or len(mittaukset) >= 30:
+                    continue
+                tila = self.hass.states.get(ent.entity_id)
+                if tila is None:
+                    continue
+                mittaukset.append({
+                    "entity_id": ent.entity_id,
+                    "nimi": str((tila.attributes or {}).get("friendly_name") or ent.entity_id)[:80],
+                    "arvo": str(tila.state)[:60],
+                })
+            loydot.append({
+                "domain": e.domain,
+                "entry_id": e.entry_id,
+                "otsikko": str(e.title or "")[:80],
+                "tila": str(_arvo(e.state)),
+                "host": host,
+                "laite": (str(laitteet[0].name_by_user or laitteet[0].name or "")[:80]
+                          if laitteet else None),
+                "malli": (str(laitteet[0].model or "")[:60] or None) if laitteet else None,
+                # 🔴 EHDOTUS, EI TOTUUS. Portti ja nopeus ovat SMLIGHTin
+                # oletuksia; jos käyttäjä on vaihtanut ne laitteen omalta
+                # sivulta, ehdotus on väärä — siksi se on esitäyte, ei komento.
+                "ehdotus": ({
+                    "polku": "socket://%s:%d" % (host, self.RADIO_PORTTI),
+                    "radiotyyppi": self.RADIO_TYYPPI,
+                    "nopeus": self.RADIO_NOPEUS,
+                } if host else None),
+                "mittaukset": mittaukset,
+            })
+        # mDNS-löydöt joita kukaan ei ole vielä lisännyt.
+        odottaa = [f for f in self._loydetyt_lista() if f.get("domain") in self.RADIO_DOMAINIT]
+        return {
+            "zha_kaytossa": zha_kaytossa,
+            "zha_keskitin": bool(self.hass.config_entries.async_entries("zha")) and any(
+                dict(getattr(e, "data", None) or {}).get("device")
+                for e in self.hass.config_entries.async_entries("zha")),
+            "loydot": loydot,
+            "odottaa": odottaa,
+            "syy": None if loydot or odottaa else "ei_verkkoradiota",
+        }
+
     # ═══ VAIHE 2: HACS ═══════════════════════════════════════════════════════
     #
     # 🔴 HACS:llä ei ole palvelukutsuja, vain websocket-komennot, joita sen oma
