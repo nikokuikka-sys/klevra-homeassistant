@@ -41,6 +41,10 @@ KIINNOSTAVAT = (
     "alarm_control_panel.",
     "camera.",
     "media_player.",
+    # 📺 KAUKOSÄÄDIN [SALMI 18.11.2026, korjausehdotus #206]. Nikon Home
+    # Assistantiin tekemä «Elisa Viihde» -kaukosäädin ei tullut Klevraan,
+    # koska `remote.` puuttui tästä listasta. Mitattu, ei arvattu.
+    "remote.",
     "input_boolean.",
 )
 
@@ -98,7 +102,7 @@ KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
 # 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
 # Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
 HALLINTA_VERSIO = 2
-LISAOSA_VERSIO = "1.4.0"
+LISAOSA_VERSIO = "1.5.0"
 HALLINTA_TOIMINNOT = (
     "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
     "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)

@@ -59,6 +59,99 @@ def _json_turvallinen(x):
     return json.loads(json.dumps(x, default=str))
 
 
+def _oletusarvo(avain):
+    """voluptuous-merkin oletusarvo, tai None jos sitä ei ole.
+
+    Merkin `default` on voluptuousissa joko kutsuttava tehdas tai UNDEFINED-
+    sentinel (ei kutsuttava). Vain tehtaan tulos on oikea oletus.
+    """
+    tehdas = getattr(avain, "default", None)
+    if not callable(tehdas):
+        return None
+    try:
+        arvo = tehdas()
+    except Exception:  # noqa: BLE001  oletus, jota ei saa laskettua, jätetään pois
+        return None
+    if arvo is None or type(arvo).__name__ == "Undefined":
+        return None
+    return arvo
+
+
+def _validoijan_muoto(validoija, syvyys=0):
+    """Validoijasta ne kentän tiedot, jotka Klevran lomake osaa piirtää.
+
+    Tunnistus on ankkuroitu OMINAISUUKSIIN eikä luokkien nimiin, koska
+    voluptuousia ei tuoda tänne lainkaan: `In` tunnetaan `container`-
+    kentästä, HA:n selector `selector_type`-kentästä, `All`/`Any`
+    `validators`-listasta.
+    """
+    if validoija is None or syvyys > 3:
+        return {}
+    ulos = {}
+    osat = getattr(validoija, "validators", None)
+    if isinstance(osat, (list, tuple)):
+        for osa in osat:
+            for k, v in _validoijan_muoto(osa, syvyys + 1).items():
+                ulos.setdefault(k, v)
+        return ulos
+    laji = getattr(validoija, "selector_type", None)
+    if isinstance(laji, str) and laji:
+        ulos["selector"] = {laji: getattr(validoija, "config", None) or {}}
+        return ulos
+    sailio = getattr(validoija, "container", None)
+    if isinstance(sailio, dict):
+        ulos["options"] = [[a, b] for a, b in sailio.items()]
+        return ulos
+    if isinstance(sailio, (list, tuple, set, frozenset)):
+        ulos["options"] = [x for x in sailio]
+        return ulos
+    if validoija is bool:
+        return {"type": "boolean"}
+    if validoija is int:
+        return {"type": "integer"}
+    if validoija is float:
+        return {"type": "float"}
+    if validoija is str:
+        return {"type": "string"}
+    nimi = getattr(validoija, "__name__", "")
+    if nimi == "boolean":
+        return {"type": "boolean"}
+    if nimi in ("positive_int", "port"):
+        return {"type": "integer"}
+    if nimi in ("string", "url", "template"):
+        return {"type": "string"}
+    return ulos
+
+
+def _kentat_skeemasta(skeema):
+    """vol.Schema → kenttälista ILMAN voluptuous_serializea.
+
+    🔴 Kirjoitettu 18.11.2026 (Niko, korjausehdotus #204): kodin Home
+    Assistantista puuttui `voluptuous_serialize`, ja koko lisäyslomake jäi
+    yhden rivin virheilmoitukseksi — laitetta ei voinut lisätä lainkaan.
+    Skeema on sanakirja, jonka avaimet ovat Required/Optional-merkkejä;
+    se luetaan tässä itse, jottei lomake riipu yhdestä valinnaisesta
+    kirjastosta.
+    """
+    raaka = getattr(skeema, "schema", skeema)
+    if not isinstance(raaka, dict):
+        raise TypeError("skeema ei ole sanakirja (%s)" % type(raaka).__name__)
+    kentat = []
+    for avain, validoija in raaka.items():
+        nimi = getattr(avain, "schema", avain)
+        kentta = {"name": str(nimi)}
+        if type(avain).__name__ == "Required":
+            kentta["required"] = True
+        oletus = _oletusarvo(avain)
+        if oletus is not None:
+            kentta["default"] = oletus
+        kentta.update(_validoijan_muoto(validoija))
+        kentat.append(kentta)
+    if not kentat:
+        raise ValueError("skeemassa ei ollut yhtään kenttää")
+    return kentat
+
+
 class Hallinta:
     """Nimetyt hallintatoiminnot. Yksi instanssi per silta."""
 
@@ -160,24 +253,36 @@ class Hallinta:
         return await self._sarjoita(tulos)
 
     def _saako_koskea(self, flow_id):
-        """Flow on Klevran oma tai HA:n itse löytämä. Muuten ei kosketa."""
+        """Flow on Klevran oma tai HA:n itse löytämä. Muuten Hylatty.
+
+        🔴 KAKSI ERI SYYTÄ, EI YHTÄ. [Niko 18.11.2026, ehdotus #202 / issue #206]
+        Aiemmin tämä palautti `None` kolmesta eri syystä ja kutsuja käänsi
+        jokaisen samaksi virheeksi: «Tätä lisäystä ei aloitettu Klevrasta, eikä
+        se ole Home Assistantin löytämä laite.» Nikon kuvassa se luki löydetyn
+        laitteen päällä — ja väite oli epätosi: laite OLI HA:n löytämä, mutta
+        «Löydetyt laitteet» -lista oli vanha, eikä sen `flow_id` ollut enää
+        käynnissä. S48: tilakoodi kertoo sen mitä tapahtui, ei sitä mikä on
+        lähin olemassa oleva koodi.
+
+          flow_id tyhjä tai ei enää käynnissä → `flow_vanhentunut` (lista vanha)
+          flow käynnissä mutta HA:n oma       → `flow_ei_klevran`  (ei kosketa)
+        """
         if not flow_id:
-            return None
+            raise Hylatty("flow_vanhentunut")
         for f in self.hass.config_entries.flow.async_progress():
             if f.get("flow_id") != flow_id:
                 continue
             if f.get("handler") in HALLINTA_KIELLETYT:
-                return None
+                raise Hylatty("flow_ei_klevran")
             lahde = (f.get("context") or {}).get("source")
             if flow_id in self.omat_flowt or lahde not in (None, "user"):
                 return f
-            return None
-        return None
+            raise Hylatty("flow_ei_klevran")
+        raise Hylatty("flow_vanhentunut")
 
     async def _flow_jatka(self, tiedot):
         flow_id = str(tiedot.get("flow_id") or "")
-        if not self._saako_koskea(flow_id):
-            raise Hylatty("flow_ei_klevran")
+        self._saako_koskea(flow_id)
         syote = tiedot.get("syote")
         # 🔴 None on HA:ssa «näytä nykyinen vaihe». Löydetty laite avataan
         # näin: ensin None (lomake/vahvistus), sitten käyttäjän syöte.
@@ -192,8 +297,7 @@ class Hallinta:
 
     async def _flow_peru(self, tiedot):
         flow_id = str(tiedot.get("flow_id") or "")
-        if not self._saako_koskea(flow_id):
-            raise Hylatty("flow_ei_klevran")
+        self._saako_koskea(flow_id)
         self.hass.config_entries.flow.async_abort(flow_id)
         self.omat_flowt.discard(flow_id)
         return {"peruttu": flow_id}
@@ -265,8 +369,15 @@ class Hallinta:
 
             kentat = convert(skeema, custom_serializer=cv.custom_serializer)
         except Exception as e:  # noqa: BLE001
-            # 🔴 Ilman kenttiä lomaketta ei voi täyttää. Kerrotaan se suoraan.
-            return [{"name": "_", "virhe": f"kenttiä ei saatu luettua: {str(e)[:120]}"}]
+            # 🔴 `voluptuous_serialize` puuttui Nikon Home Assistantista
+            # 18.11.2026 ja lomake jäi yhdeksi punaiseksi riviksi. Kirjasto on
+            # mukavuus, ei ehto: skeema luetaan tarvittaessa itse.
+            _LOGGER.debug("voluptuous_serialize ei käytettävissä (%s) — luetaan skeema itse", e)
+            try:
+                kentat = _kentat_skeemasta(skeema)
+            except Exception as e2:  # noqa: BLE001
+                # 🔴 Ilman kenttiä lomaketta ei voi täyttää. Kerrotaan se suoraan.
+                return [{"name": "_", "virhe": f"kenttiä ei saatu luettua: {str(e2)[:120]}"}]
         for kentta in kentat:
             nimi = kentta.get("name")
             kentta["otsikko"] = k.get(f"{polku}.data.{nimi}") or nimi
