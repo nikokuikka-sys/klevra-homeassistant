@@ -46,6 +46,14 @@ KIINNOSTAVAT = (
     # koska `remote.` puuttui tästä listasta. Mitattu, ei arvattu.
     "remote.",
     "input_boolean.",
+    # 🌤 SÄÄENTITEETTI [SALMI 20.11.2026, Niko klo 09.10: «joka haetaan sää
+    # tiedoistajen muutos siellä voisi olla jos ennustetaan lunta tai
+    # vesisadetta tai tulee pakkasta»]. Ennustepohjat (pakkasvahdin ennakointi)
+    # tarvitsevat sääentiteetin tunnuksen, ja käyttäjän on voitava VALITA se.
+    # 🔴 Ilman tätä riviä pohjassa olisi valintalista ilman yhtään
+    # vaihtoehtoa — nappi, joka ei tee mitä lupaa. Mitattu lukemalla
+    # `valvontaAnturit`, ei oletettu.
+    "weather.",
 )
 
 # 🔴 KOMENTOJEN SALLITUT PALVELUT, domainkohtaisesti.
@@ -101,8 +109,8 @@ KIELLETYT_KENTAT = {"entity_id", "device_id", "area_id", "label_id"}
 #
 # 🔴 NIMETYT TOIMINNOT, EI VAPAATA KUTSUA. Jokainen alla oleva on yksi
 # Python-funktio `hallinta.py`:ssa. Palvelin ei voi pyytää mitään muuta.
-HALLINTA_VERSIO = 6
-LISAOSA_VERSIO = "1.10.0"
+HALLINTA_VERSIO = 7
+LISAOSA_VERSIO = "1.13.0"
 HALLINTA_TOIMINNOT = (
     "tila",            # HA-versio, integraatiot, Zigbee/Matter valmiina?
     "loydetyt",        # HA:n itse löytämät laitteet (zeroconf, dhcp, ssdp…)
@@ -132,6 +140,58 @@ HALLINTA_TOIMINNOT = (
     "automaatio_kirjoita", # Klevran ajastus → HA:n automations.yaml
     "automaatio_poista",   # Klevran oma rivi pois (ei koske muihin)
 )
+
+# ══ 1.11.0 (HALLINTA_VERSIO 7): LAUKAISIMET, EHDOT JA SÄÄENNUSTE ══════════
+# [Niko 20.11.2026 klo 09.10: «mahdollisimman monipuolisia automaatio
+#  vaihtoehtoja mitkä pystyvät triggeröimään toiminnan kuten kellonaika
+#  auringonnousu ja lasku … jos ennustetaan lunta tai vesisadetta tai tulee
+#  pakkasta se voisi ennakoida esimerkiksi pakkas vahdin»]
+#
+# 🔴 UUSI TOIMINTO EI LISÄTTY. Nämä ovat `automaatio_kirjoita`:n kenttiä, ei
+# uusia hallintatoimintoja: sama portti, sama tarkistus, sama katto. Yksi
+# toiminto joka osaa enemmän on turvallisempi kuin viisi uutta toimintoa.
+#
+# 🔴 VALKOINEN LISTA, EI VAPAA MUOTO. Palvelin saa pyytää vain näitä lajeja.
+# Tuntematon laji hylätään — ei ohiteta hiljaa: hiljaa ohitettu laukaisin
+# tarkoittaisi automaatiota, joka ei laukea koskaan, ja käyttäjä näkisi sen
+# rivin Klevrassa toimivana.
+LAUKAISIN_LAJIT = (
+    "kello",      # time — kellonaika
+    "aurinko",    # sun — auringonnousu/lasku ± siirto
+    "tila",       # state — laitteen tila vaihtui (ovi auki, läsnäolo)
+    "lukuarvo",   # numeric_state — mittari ylitti/alitti rajan
+    "aikakuvio",  # time_pattern — joka N minuutti (sääennusteen tarkistus)
+)
+
+EHTO_LAJIT = (
+    "aika",       # time — kellonaikaväli ja/tai viikonpäivät
+    "aurinko",    # sun — ennen/jälkeen nousun tai laskun
+    "tila",       # state — laite on tietyssä tilassa
+    "lukuarvo",   # numeric_state — mittari rajojen sisällä
+    "ennuste",    # 🔴 sääennuste: rakennetaan TÄÄLLÄ nimetyistä paloista
+)
+
+# 🔴 SÄÄENNUSTE ON AINOA TEMPLAATTI, JA SEN KIRJOITTAA TÄMÄ TIEDOSTO.
+# Home Assistantin ennuste saadaan vain `weather.get_forecasts`-kutsulla,
+# jonka vastausta luetaan Jinja-templaatilla. Palvelin EI saa lähettää
+# templaattia: se ajetaan kodissa HA:n oikeuksilla, ja yksi merkkijono
+# kiertäisi koko SALLITUT-listan. Siksi palvelin lähettää vain mittarin
+# nimen tältä listalta sekä luvut, ja lisäosa kirjoittaa lausekkeen.
+SAA_MITTARIT = {
+    # avain → (ennusteen kenttä, suomenkielinen nimi)
+    "lampotila": ("temperature", "lämpötila"),
+    "sade_mm": ("precipitation", "sademäärä"),
+    "sade_tod": ("precipitation_probability", "sateen todennäköisyys"),
+    "tuuli": ("wind_speed", "tuulen nopeus"),
+}
+
+# Ennusteen ikkuna tunneissa: 1–48. Pidempi ei ole ennuste vaan arvaus.
+ENNUSTE_TUNNIT_MAX = 48
+# Laukaisimia ja ehtoja per automaatio. Katto laskee, ei nouse.
+LAUKAISIN_KATTO = 5
+EHTO_KATTO = 5
+# `odota`-askeleen pituus sekunteina: enintään 6 tuntia.
+ODOTA_MAX_S = 6 * 3600
 
 # 🔴 TARKISTETTU LUETTELO. Käyttäjän ALOITTAMA lisäys on mahdollinen vain
 # näille. HA:n ITSE LÖYTÄMÄT laitteet saa vahvistaa riippumatta tästä

@@ -32,8 +32,15 @@ import logging
 import re
 
 from .const import (
+    EHTO_KATTO,
+    EHTO_LAJIT,
+    ENNUSTE_TUNNIT_MAX,
     HACS_KATALOGI,
     HALLINTA_KATALOGI,
+    LAUKAISIN_KATTO,
+    LAUKAISIN_LAJIT,
+    ODOTA_MAX_S,
+    SAA_MITTARIT,
     HALLINTA_KIELLETYT,
     HALLINTA_LAITE_KATTO,
     HALLINTA_TOIMINNOT,
@@ -789,6 +796,313 @@ class Hallinta:
     AUTOMAATIO_KATTO = 100
     VIIKONPAIVAT = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
+    # ══ LAUKAISIMET, EHDOT JA ASKELEET [1.11.0] ═══════════════════════════
+    # 🔴 YKSI SÄÄNTÖ KAIKILLE KOLMELLE: entiteetti tarkistetaan, luku
+    # tarkistetaan rajoineen, ja tuntematon laji HYLÄTÄÄN. Hiljaa ohitettu
+    # laukaisin on automaatio joka ei laukea koskaan — ja Klevrassa rivi
+    # näyttäisi toimivalta. Sama ansa kuin `paivat`-kentässä: se oli hiljaa
+    # ohitettu vanhassa lisäosassa, ja sunnuntain ajastus laukesi maanantaina.
+
+    @staticmethod
+    def _entiteetti(x):
+        """Entiteettitunnus tai Hylatty. `domain.nimi`, sallitut merkit vain."""
+        e = str(x or "").strip()
+        if not re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", e):
+            raise Hylatty("entiteetti_ei_kelpaa")
+        return e
+
+    @staticmethod
+    def _desimaali(x, nimi="raja"):
+        """Laukaisimen raja saa olla desimaali (kosteus 62,5 %). None = ei rajaa.
+
+        🔴 `_luku` PYÖRISTÄÄ KOKONAISLUVUKSI, eikä sitä käytetä täällä.
+        Lämpötilaraja -0,5 pyöristyisi nollaan, ja pakkasvahti laukeaisi
+        väärässä pisteessä. Mitattu lukemalla `_luku`:n toteutus, ei oletettu.
+        """
+        if x is None:
+            return None
+        try:
+            n = float(x)
+        except Exception:  # noqa: BLE001
+            raise Hylatty("%s_ei_luku" % nimi)
+        if n != n or n in (float("inf"), float("-inf")):
+            raise Hylatty("%s_ei_luku" % nimi)
+        if not -100000 <= n <= 100000:
+            raise Hylatty("%s_ei_jarkeva" % nimi)
+        # Kokonaisluku kirjoitetaan kokonaislukuna: YAML:ssa 21 on siistimpi
+        # kuin 21.0, ja ihminen lukee tiedostoa.
+        return int(n) if float(n).is_integer() else n
+
+    def _kesto(self, x):
+        """Laukaisimen `for`-kesto sekunteina → HH:MM:SS, tai None."""
+        s = self._luku(x, 0, ODOTA_MAX_S)
+        if x is not None and s is None:
+            raise Hylatty("kesto_ei_kelpaa")
+        if not s:
+            return None
+        return "%02d:%02d:%02d" % (s // 3600, (s % 3600) // 60, s % 60)
+
+    def _viikonpaivat(self, paivat):
+        """Klevran päivänumerot (0 = sunnuntai, JS getDay) → HA:n lyhenteet."""
+        if not isinstance(paivat, list) or not paivat:
+            raise Hylatty("paivat_ei_kelpaa")
+        try:
+            numerot = sorted({int(x) for x in paivat})
+        except Exception:  # noqa: BLE001
+            raise Hylatty("paivat_ei_kelpaa")
+        if any(n < 0 or n > 6 for n in numerot):
+            raise Hylatty("paivat_ei_kelpaa")
+        # 🔴 0 = SUNNUNTAI KLEVRASSA, HA:ssa viikko alkaa maanantaista.
+        return [self.VIIKONPAIVAT[(n + 6) % 7] for n in numerot]
+
+    @staticmethod
+    def _kello(x, nimi="kello"):
+        k = str(x or "")
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", k):
+            raise Hylatty("%s_ei_kelpaa" % nimi)
+        return k + ":00"
+
+    def _aurinko_siirto(self, tiedot):
+        """Auringon siirto minuutteina → ±HH:MM:SS. Etumerkki aina mukaan."""
+        siirto = self._luku(tiedot.get("siirto_min"), -720, 720) or 0
+        # 🔴 ETUMERKKI KIRJOITETAAN AINA. HA lukee etumerkittömän arvon
+        # positiivisena, joten «01:30:00» toimisi — mutta ihminen joka avaa
+        # automations.yaml:n ei näe siitä kumpaan suuntaan siirto menee.
+        merkki = "-" if siirto < 0 else "+"
+        a = abs(int(siirto))
+        return "%s%02d:%02d:00" % (merkki, a // 60, a % 60)
+
+    def _laukaisin_yksi(self, l):
+        """Yksi laukaisin → HA:n trigger-sanakirja. Hylkää tuntemattoman."""
+        if not isinstance(l, dict):
+            raise Hylatty("laukaisin_ei_kelpaa")
+        laji = str(l.get("laji") or "")
+        if laji not in LAUKAISIN_LAJIT:
+            raise Hylatty("laukaisinta_ei_tueta")
+
+        if laji == "kello":
+            return {"platform": "time", "at": self._kello(l.get("kello"))}
+
+        if laji == "aurinko":
+            suunta = str(l.get("aurinko") or "")
+            if suunta not in ("nousu", "lasku"):
+                raise Hylatty("aurinko_ei_kelpaa")
+            return {"platform": "sun",
+                    "event": "sunrise" if suunta == "nousu" else "sunset",
+                    "offset": self._aurinko_siirto(l)}
+
+        if laji == "tila":
+            ulos = {"platform": "state", "entity_id": self._entiteetti(l.get("id"))}
+            # 🔴 `mihin` JA `mista` OVAT VALINNAISIA, MUTTA TYHJÄ MERKKIJONO EI
+            # OLE SAMA KUIN PUUTTUVA. HA tulkitsee `to: ""` tilaksi, jota ei
+            # ole olemassa, eikä automaatio laukeaisi koskaan.
+            for avain, ha in (("mihin", "to"), ("mista", "from")):
+                v = l.get(avain)
+                if v is None:
+                    continue
+                v = str(v).strip()
+                if not v:
+                    raise Hylatty("%s_tyhja" % avain)
+                if not re.fullmatch(r"[A-Za-z0-9_.\- ]{1,60}", v):
+                    raise Hylatty("%s_ei_kelpaa" % avain)
+                ulos[ha] = v
+            if "to" not in ulos and "from" not in ulos:
+                # Ilman kumpaakaan tämä laukeaisi jokaisesta attribuutin
+                # muutoksesta — kosteusanturilla kymmeniä kertoja tunnissa.
+                raise Hylatty("tilalaukaisin_ilman_rajausta")
+            kesto = self._kesto(l.get("kesto_s"))
+            if kesto:
+                ulos["for"] = kesto
+            return ulos
+
+        if laji == "lukuarvo":
+            yli = self._desimaali(l.get("yli"), "yli")
+            alle = self._desimaali(l.get("alle"), "alle")
+            if yli is None and alle is None:
+                raise Hylatty("lukuarvo_ilman_rajaa")
+            ulos = {"platform": "numeric_state",
+                    "entity_id": self._entiteetti(l.get("id"))}
+            attribuutti = l.get("attribuutti")
+            if attribuutti is not None:
+                a = str(attribuutti).strip()
+                if not re.fullmatch(r"[a-z0-9_]{1,40}", a):
+                    raise Hylatty("attribuutti_ei_kelpaa")
+                ulos["attribute"] = a
+            if yli is not None:
+                ulos["above"] = yli
+            if alle is not None:
+                ulos["below"] = alle
+            kesto = self._kesto(l.get("kesto_s"))
+            if kesto:
+                ulos["for"] = kesto
+            return ulos
+
+        # aikakuvio
+        minuutit = self._luku(l.get("minuutit"), 1, 60)
+        if minuutit is None:
+            raise Hylatty("aikakuvio_ei_kelpaa")
+        return {"platform": "time_pattern", "minutes": "/%d" % minuutit}
+
+    def _ennuste_askeleet(self, e):
+        """Sääennusteen ehto → HA-askeleet. 🔴 TÄMÄN TEMPLAATIN KIRJOITTAA TÄMÄ
+        FUNKTIO, EI PALVELIN.
+
+        Palvelimelta tulee vain: sääentiteetti, mittarin AVAIN tältä listalta
+        (`SAA_MITTARIT`), tuntimäärä ja luvut. Lauseke kootaan tässä. Jos
+        palvelin saisi lähettää templaatin, se ajettaisiin kodissa HA:n
+        oikeuksilla ja koko `SALLITUT`-lista olisi kierrettävissä yhdellä
+        merkkijonolla.
+
+        Palauttaa listan: ennusteen haku + template-ehto.
+        """
+        entiteetti = self._entiteetti(e.get("id"))
+        if not entiteetti.startswith("weather."):
+            raise Hylatty("ennuste_vaatii_saaentiteetin")
+        avain = str(e.get("mittari") or "")
+        if avain not in SAA_MITTARIT:
+            raise Hylatty("mittaria_ei_tueta")
+        kentta = SAA_MITTARIT[avain][0]
+        tunnit = self._luku(e.get("tunteja"), 1, ENNUSTE_TUNNIT_MAX)
+        if tunnit is None:
+            raise Hylatty("tunteja_ei_kelpaa")
+        alle = self._desimaali(e.get("alle"), "alle")
+        yli = self._desimaali(e.get("yli"), "yli")
+        if alle is None and yli is None:
+            raise Hylatty("ennuste_ilman_rajaa")
+
+        # 🔴 KOOSTETTA EI RAKENNETA MERKKIJONOYHDISTELYLLÄ KÄYTTÄJÄN DATASTA.
+        # Jokainen paikka alla on tarkistettu: entiteetti vastaa tiukkaa
+        # kaavaa, `kentta` tulee SAA_MITTARIT-listalta, luvut ovat lukuja ja
+        # tunnit kokonaisluku väliltä 1..48.
+        #
+        # 🔴 `min`/`max` TYHJÄSTÄ LISTASTA KAATUU JINJASSA. Jos ennuste on
+        # tyhjä (integraatio alhaalla, entiteetti juuri lisätty), `| min`
+        # heittäisi, automaatio kirjaisi virheen ja käyttäjä näkisi vain
+        # «automaatio ei toimi». Siksi lista otetaan muuttujaan ja tyhjä
+        # tarkistetaan erikseen: tyhjä ennuste = ehto EI täyty.
+        # 🔴 EI `%`-MUOTOILUA TÄSSÄ. Lauseke kootaan `replace`:lla, joten
+        # aaltosulkeet ja prosentit kirjoitetaan sellaisenaan. Ensimmäinen
+        # versio käytti `%%`- ja `{{{{`-pakoja ikään kuin tässä olisi
+        # `%`-muotoilu — ja tuotti Jinjaa, jossa oli `{%%` ja `{{{{`.
+        # Se EI ole kelvollinen templaatti: automaatio olisi kirjoittunut
+        # kotiin ja kaatunut vasta ajossa, pakkasyönä. Mitattu ajamalla
+        # `_automaatio_yaml` oikealla PyYAML:lla, ei lukemalla koodia.
+        pohja = (
+            "{% set e = ennuste.get('{ent}', {}).get('forecast', [])[:{h}] %}"
+            "{% set v = e | map(attribute='{k}') | reject('none') | list %}"
+            "{{ v | length > 0 and {vertailu} }}"
+        )
+        vertailut = []
+        if alle is not None:
+            vertailut.append("(v | min) < %s" % alle)
+        if yli is not None:
+            vertailut.append("(v | max) > %s" % yli)
+        lauseke = pohja.replace("{ent}", entiteetti).replace("{h}", str(tunnit)) \
+            .replace("{k}", kentta).replace("{vertailu}", " and ".join(vertailut))
+
+        return [
+            {"action": "weather.get_forecasts",
+             "target": {"entity_id": entiteetti},
+             "data": {"type": "hourly"},
+             "response_variable": "ennuste"},
+            {"condition": "template", "value_template": lauseke},
+        ]
+
+    def _ehto_yksi(self, e):
+        """Yksi ehto → HA:n condition-sanakirja, TAI lista askeleita (ennuste).
+
+        🔴 ENNUSTE ON ASKEL, EI EHTO. `weather.get_forecasts` on palvelukutsu,
+        jonka vastausta luetaan — HA:n `conditions:`-lohkossa ei voi kutsua
+        palvelua. Siksi ennuste menee toimintojen ALKUUN ehtoaskeleena, ja
+        `_automaatio_yaml` erottelee ne. Jos tämä olisi laitettu `conditions:`
+        -lohkoon, automaatio ei olisi latautunut lainkaan.
+        """
+        if not isinstance(e, dict):
+            raise Hylatty("ehto_ei_kelpaa")
+        laji = str(e.get("laji") or "")
+        if laji not in EHTO_LAJIT:
+            raise Hylatty("ehtoa_ei_tueta")
+
+        if laji == "aika":
+            ulos = {"condition": "time"}
+            if e.get("jalkeen") is not None:
+                ulos["after"] = self._kello(e.get("jalkeen"), "jalkeen")
+            if e.get("ennen") is not None:
+                ulos["before"] = self._kello(e.get("ennen"), "ennen")
+            if e.get("paivat") is not None:
+                ulos["weekday"] = self._viikonpaivat(e.get("paivat"))
+            if len(ulos) == 1:
+                raise Hylatty("aikaehto_tyhja")
+            return ulos
+
+        if laji == "aurinko":
+            ulos = {"condition": "sun"}
+            for avain, ha in (("jalkeen", "after"), ("ennen", "before")):
+                v = e.get(avain)
+                if v is None:
+                    continue
+                if str(v) not in ("nousu", "lasku"):
+                    raise Hylatty("aurinkoehto_ei_kelpaa")
+                ulos[ha] = "sunrise" if str(v) == "nousu" else "sunset"
+            if len(ulos) == 1:
+                raise Hylatty("aurinkoehto_tyhja")
+            siirto = e.get("siirto_min")
+            if siirto is not None:
+                # HA:n sun-ehdossa siirto koskee sitä reunaa joka on asetettu;
+                # jos molemmat ovat, siirtoa ei voi kohdistaa yksikäsitteisesti.
+                if "after" in ulos and "before" in ulos:
+                    raise Hylatty("siirto_kahdelle_reunalle")
+                ulos["after_offset" if "after" in ulos else "before_offset"] = \
+                    self._aurinko_siirto(e)
+            return ulos
+
+        if laji == "tila":
+            tila = str(e.get("on") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.\- ]{1,60}", tila):
+                raise Hylatty("tilaehto_ei_kelpaa")
+            return {"condition": "state",
+                    "entity_id": self._entiteetti(e.get("id")), "state": tila}
+
+        if laji == "lukuarvo":
+            yli = self._desimaali(e.get("yli"), "yli")
+            alle = self._desimaali(e.get("alle"), "alle")
+            if yli is None and alle is None:
+                raise Hylatty("lukuarvo_ilman_rajaa")
+            ulos = {"condition": "numeric_state",
+                    "entity_id": self._entiteetti(e.get("id"))}
+            if yli is not None:
+                ulos["above"] = yli
+            if alle is not None:
+                ulos["below"] = alle
+            return ulos
+
+        return self._ennuste_askeleet(e)
+
+    def _askel(self, t):
+        """Yksi toiminto → HA:n action-askel. Palvelukutsu tai odotus."""
+        if not isinstance(t, dict):
+            raise Hylatty("toiminto_ei_kelpaa")
+        if str(t.get("laji") or "") == "odota":
+            s = self._luku(t.get("sekuntia"), 1, ODOTA_MAX_S)
+            if s is None:
+                raise Hylatty("odotus_ei_kelpaa")
+            return {"delay": {"hours": s // 3600, "minutes": (s % 3600) // 60,
+                              "seconds": s % 60}}
+        entiteetti = str(t.get("entity_id") or "")
+        palvelu = str(t.get("palvelu") or "")
+        # 🔴 SAMA PORTTI KUIN SUORALLA KOMENNOLLA. Automaatio on komento joka
+        # ajetaan myöhemmin; sen tarkistus ei saa olla löysempi.
+        pari, syy = tarkista_palvelu(entiteetti, palvelu)
+        if pari is None:
+            raise Hylatty(syy)
+        domain, nimi_p = pari
+        return {
+            "service": "%s.%s" % (domain, nimi_p),
+            "target": {"entity_id": entiteetti},
+            "data": {k: v for k, v in (t.get("data") or {}).items()
+                     if k not in KIELLETYT_KENTAT},
+        }
+
     def _automaatiotiedosto(self):
         return self.hass.config.path("automations.yaml")
 
@@ -872,48 +1186,87 @@ class Hallinta:
             # maanantaina — hiljaa ja joka viikko.
             viikonpaivat = [self.VIIKONPAIVAT[(n + 6) % 7] for n in numerot]
 
-        laukaisu = {}
-        aurinko = str(tiedot.get("aurinko") or "")
-        if aurinko in ("nousu", "lasku"):
-            siirto = self._luku(tiedot.get("siirto_min"), -720, 720) or 0
-            # 🔴 ETUMERKKI KIRJOITETAAN AINA. Home Assistant lukee etumerkittömän
-            # arvon positiivisena, joten «01:30:00» toimisi — mutta ihminen joka
-            # avaa automations.yaml:n ei näe siitä kumpaan suuntaan siirto menee.
-            # Mitattu `test/automaatio-kotiin.py`:llä 19.11.2026.
-            merkki = "-" if siirto < 0 else "+"
-            a = abs(int(siirto))
-            laukaisu = {"platform": "sun",
-                        "event": "sunrise" if aurinko == "nousu" else "sunset",
-                        "offset": "%s%02d:%02d:00" % (merkki, a // 60, a % 60)}
-        else:
-            kello = str(tiedot.get("kello") or "")
-            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", kello):
-                raise Hylatty("kello_ei_kelpaa")
-            laukaisu = {"platform": "time", "at": kello + ":00"}
+        # ══ LAUKAISIMET ════════════════════════════════════════════════════
+        # 🔴 KAKSI MUOTOA, YKSI MERKITYS. Vanha palvelin lähettää `kello` tai
+        # `aurinko` suoraan paketin juuressa; 1.11.0:sta alkaen se voi lähettää
+        # `laukaisimet`-listan. Vanha muoto EI poistu: lisäosa päivittyy ennen
+        # palvelinta tai palvelin ennen lisäosaa — kumpi tahansa järjestys on
+        # mahdollinen, eikä kodin ajastus saa kadota päivityksen takia.
+        #
+        # 🔴 EIKÄ NIITÄ YHDISTETÄ. Jos paketti kantaisi molemmat, kumpi voittaa
+        # selviäisi vasta siitä kumpi laukesi. Sama sääntö kuin `kerta` ja
+        # `toisto` yllä.
+        laukaisimet_raaka = tiedot.get("laukaisimet")
+        vanha_muoto = (tiedot.get("kello") is not None
+                       or str(tiedot.get("aurinko") or "") in ("nousu", "lasku"))
+        if laukaisimet_raaka is not None and vanha_muoto:
+            raise Hylatty("kaksi_laukaisinmuotoa")
 
+        if laukaisimet_raaka is not None:
+            if not isinstance(laukaisimet_raaka, list) or not laukaisimet_raaka:
+                raise Hylatty("ei_laukaisimia")
+            if len(laukaisimet_raaka) > LAUKAISIN_KATTO:
+                raise Hylatty("liikaa_laukaisimia")
+            laukaisut = [self._laukaisin_yksi(l) for l in laukaisimet_raaka]
+        else:
+            aurinko = str(tiedot.get("aurinko") or "")
+            if aurinko in ("nousu", "lasku"):
+                laukaisut = [self._laukaisin_yksi(
+                    {"laji": "aurinko", "aurinko": aurinko,
+                     "siirto_min": tiedot.get("siirto_min")})]
+            else:
+                laukaisut = [self._laukaisin_yksi(
+                    {"laji": "kello", "kello": tiedot.get("kello")})]
+
+        # ══ EHDOT ══════════════════════════════════════════════════════════
+        # 🔴 ENNUSTE EI MAHDU `condition:`-LOHKOON, koska se vaatii
+        # palvelukutsun (`weather.get_forecasts`). Siksi ennuste-ehdot menevät
+        # toimintojen ALKUUN askeleina: automaatio laukeaa, hakee ennusteen,
+        # ja pysähtyy template-ehtoon jos ennuste ei täsmää. Lopputulos on sama,
+        # mutta HA lataa tiedoston — `conditions:`-lohkossa se ei latautuisi.
+        ehdot = []
+        esiaskeleet = []
+        ehdot_raaka = tiedot.get("ehdot")
+        if ehdot_raaka is not None:
+            if not isinstance(ehdot_raaka, list):
+                raise Hylatty("ehdot_ei_lista")
+            if len(ehdot_raaka) > EHTO_KATTO:
+                raise Hylatty("liikaa_ehtoja")
+            for e in ehdot_raaka:
+                tulos = self._ehto_yksi(e)
+                if isinstance(tulos, list):
+                    esiaskeleet.extend(tulos)
+                else:
+                    ehdot.append(tulos)
+
+        # Kerta-ajastus ja viikonpäivät ovat ehtoja siinä missä muutkin.
+        if kertaehto is not None:
+            ehdot.insert(0, kertaehto)
+        elif len(viikonpaivat) < 7:
+            ehdot.insert(0, {"condition": "time", "weekday": viikonpaivat})
+
+        # ══ TOIMINNOT ══════════════════════════════════════════════════════
         toiminnot = tiedot.get("toiminnot")
         if not isinstance(toiminnot, list) or not toiminnot:
             raise Hylatty("ei_toimintoja")
         if len(toiminnot) > 30:
             raise Hylatty("liikaa_toimintoja")
-        askeleet = []
-        for t in toiminnot:
-            if not isinstance(t, dict):
-                raise Hylatty("toiminto_ei_kelpaa")
-            entiteetti = str(t.get("entity_id") or "")
-            palvelu = str(t.get("palvelu") or "")
-            # 🔴 SAMA PORTTI KUIN SUORALLA KOMENNOLLA. Automaatio on komento
-            # joka ajetaan myöhemmin; sen tarkistus ei saa olla löysempi.
-            pari, syy = tarkista_palvelu(entiteetti, palvelu)
-            if pari is None:
-                raise Hylatty(syy)
-            domain, nimi_p = pari
-            askeleet.append({
-                "service": "%s.%s" % (domain, nimi_p),
-                "target": {"entity_id": entiteetti},
-                "data": {k: v for k, v in (t.get("data") or {}).items()
-                         if k not in KIELLETYT_KENTAT},
-            })
+        askeleet = esiaskeleet + [self._askel(t) for t in toiminnot]
+        # 🔴 PELKKÄ ODOTUS EI OLE AUTOMAATIO. Jos jokainen toiminto on `odota`,
+        # kodissa olisi rivi joka laukeaa, nukkuu ja lopettaa — eikä kukaan
+        # saisi tietää miksi mikään ei tapahtunut.
+        if not any("service" in a for a in askeleet):
+            raise Hylatty("ei_siirrettavia_toimintoja")
+
+        # 🔴 `mode` RIIPPUU SIITÄ, ODOTTAAKO AUTOMAATIO. `single` hylkää uuden
+        # laukaisun kesken odotuksen — valo jäisi palamaan, jos ovi avataan
+        # uudelleen kolmen minuutin odotuksen aikana. `restart` aloittaa
+        # odotuksen alusta. Oletus on `single` kuten ennen; `restart` vain kun
+        # palvelin sitä pyytää, ja vain kun automaatio oikeasti odottaa.
+        odottaa = any("delay" in a for a in askeleet)
+        mode = "single"
+        if str(tiedot.get("uudelleen") or "") == "alusta" and odottaa:
+            mode = "restart"
 
         return {
             "id": self.AUTOMAATIO_ETULIITE + tunnus,
@@ -924,11 +1277,9 @@ class Hallinta:
             "description": ("Klevran kirjoittama kerta-ajastus %s. Muokkaa Klevrassa — tämä rivi korvataan." % paiva
                             if kertaehto is not None
                             else "Klevran kirjoittama. Muokkaa Klevrassa — tämä rivi korvataan."),
-            "mode": "single",
-            "trigger": [laukaisu],
-            "condition": ([kertaehto] if kertaehto is not None
-                          else [{"condition": "time", "weekday": viikonpaivat}]
-                          if len(viikonpaivat) < 7 else []),
+            "mode": mode,
+            "trigger": laukaisut,
+            "condition": ehdot,
             "action": askeleet,
         }
 
@@ -1279,6 +1630,24 @@ class Hallinta:
         paivitykset.sort(key=lambda x: (not x["saatavilla"], x["nimi"].lower()))
         return {"paivitykset": paivitykset, "varmuuskopiot": varmuus}
 
+    def _hacsin_oma(self, eid):
+        """Onko update-entiteetti HACSin luoma? True / False / None (ei tiedossa).
+
+        🔴 KOLMIARVOINEN TARKOITUKSELLA. «Ei tiedossa» ei saa muuttua
+        «ei»:ksi: väärä varmuus johtaisi juuri siihen vikaan, jota tämä
+        korjaa — vaitonaisuuteen silloin kun uudelleenkäynnistys tarvitaan.
+        """
+        try:
+            from homeassistant.helpers import entity_registry
+
+            ent = entity_registry.async_get(self.hass).async_get(eid)
+        except Exception:  # noqa: BLE001  rekisteri puuttuu → ei tiedossa
+            return None
+        if ent is None:
+            return None
+        alusta = str(getattr(ent, "platform", "") or "")
+        return alusta == "hacs" if alusta else None
+
     async def _paivita(self, tiedot):
         eid = str(tiedot.get("entiteetti") or "")
         st = self.hass.states.get(eid) if eid.startswith("update.") else None
@@ -1291,7 +1660,18 @@ class Hallinta:
         if int(st.attributes.get("supported_features") or 0) & 8:
             data["backup"] = True
         await self.hass.services.async_call("update", "install", data, blocking=False)
-        return {"aloitettu": eid, "varmuuskopio": "backup" in data}
+        # 🔴 HACS-INTEGRAATIO EI OTA PÄIVITYSTÄ KÄYTTÖÖN ITSESTÄÄN.
+        # [SALMI 21.11.2026, Nikon ehdotukset #210 ja #211, issuet #215 ja #216]
+        # Mitattu Nikon kodista: `Päivitys · update.klevra_home · onnistui`
+        # 21.11. klo 6.45, ja klo 14.16 lisäosa ilmoitti yhä version 1.4.0 —
+        # julkaistu 1.11.0. HACS lataa tiedostot levylle, mutta vanha koodi jää
+        # muistiin kunnes Home Assistant käynnistyy uudelleen. `hacs_lataa`
+        # kertoo tämän jo; `paivita` ei kertonut, joten koti seisoi vanhalla
+        # versiolla päiviä ja kaikki 1.6.0:n ja 1.7.0:n toiminnot pysyivät
+        # estettyinä. «Onnistui» ilman tätä riviä oli tosi mutta harhaanjohtava.
+        hacs = self._hacsin_oma(eid)
+        return {"aloitettu": eid, "varmuuskopio": "backup" in data,
+                "hacs": hacs, "vaatii_uudelleenkaynnistyksen": hacs is True}
 
     def _sovellushallinta(self, slug):
         if "hassio" not in set(getattr(self.hass.config, "components", set()) or set()):

@@ -82,7 +82,25 @@ async def async_setup_entry(hass, entry):
         entiteetit=entry.options.get("entiteetit") or [],
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = silta
-    silta._tehtava = hass.async_create_task(silta.aja())
+    # 🔴 TAUSTATEHTÄVÄ, EI TAVALLINEN TEHTÄVÄ. [SALMI 21.11.2026, Nikon loki]
+    #
+    # Tässä luki `hass.async_create_task(silta.aja())`, ja Home Assistant
+    # ODOTTAA sellaista tehtävää ennen kuin julistaa käynnistyksen valmiiksi.
+    # `aja()` on ikuinen silmukka, joten se ei lopu koskaan. Mitattu Nikon
+    # lokista 19.11.2026:
+    #
+    #     22:10:08  Klevrasilta.aja() kaynnistyy
+    #     22:15:15  Setup timed out for bootstrap waiting on Klevrasilta.aja()
+    #     22:15:30  Something is blocking Home Assistant from wrapping up
+    #               the start up phase
+    #
+    # Viisi minuuttia puolivalmista Home Assistanttia JOKA käynnistyksellä —
+    # ja käyttäjälle se näyttää siltä, ettei uudelleenkäynnistys tehnyt mitään.
+    # `async_create_background_task` on nimenomaan tätä varten: se ei kuulu
+    # käynnistyksen odotuslistaan ja se peruutetaan entryn mukana.
+    silta._tehtava = entry.async_create_background_task(
+        hass, silta.aja(), name="klevra-silta"
+    )
     return True
 
 
@@ -110,7 +128,12 @@ async def async_setup(hass, config):
     if not asetukset.get("tunnus"):
         # 🪪 Kortin polku. Taustatehtävä, jotta käynnistys ei jää odottamaan:
         # laite voi seisoa nurkassa viikon ennen kuin tarra skannataan.
-        hass.async_create_task(vahdi(hass))
+        #
+        # 🔴 KOMMENTTI OLI OIKEASSA, KOODI EI. [SALMI 21.11.2026]
+        # Yllä oleva perustelu on ollut tässä alusta asti, mutta kutsu oli
+        # `hass.async_create_task`, jota Home Assistant NIMENOMAAN odottaa
+        # käynnistyksessä. Väite kirjoitettiin, ei todennettu — sääntö 6.
+        hass.async_create_background_task(vahdi(hass), name="klevra-kortti")
         _LOGGER.info("Klevra: odotetaan liitostunnusta (kortti-asennus)")
         return True
     silta = Klevrasilta(
@@ -352,8 +375,16 @@ class Klevrasilta:
                 self._virheita += 1
                 self.vali = min(VIRHE_KATTO_S, OLETUS_VALI * (2 ** min(self._virheita, 6)))
                 if self._virheita in (1, 5, 20):
+                    # 🔴 TYHJÄ POIKKEUS ON TYHJÄ SULKEIDEN VÄLI. [SALMI 21.11.2026]
+                    # Nikon lokissa luki «Klevra: yhteysvirhe ().» neljä kertaa.
+                    # Syy: `asyncio.TimeoutError()` ja `ServerDisconnectedError()`
+                    # ovat poikkeuksia, joiden `str()` on tyhjä merkkijono — vika
+                    # oli olemassa, mutta loki ei kertonut mikä. Luokan nimi on
+                    # aina olemassa, joten se on varalla.
                     _LOGGER.warning(
-                        "Klevra: yhteysvirhe (%s). Yritetaan %s s paasta.", e, self.vali
+                        "Klevra: yhteysvirhe (%s). Yritetaan %s s paasta.",
+                        str(e) or type(e).__name__,
+                        self.vali,
                     )
 
             await asyncio.sleep(self.vali)
